@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Specs are synced from nb-api-specs (local dev) or installed from GitHub Packages
+# (production). They are generated, not source — do not commit.
+specs/
+
+# Local config that may contain a PAT
+.nb/
+.env
+.env.local

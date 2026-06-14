@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+      - name: Sync OpenAPI specs
+        # No monorepo / private packages in CI — fetch the public specs over HTTP.
+        run: npm run sync-specs
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npx tsc -p tsconfig.json
+
+      - name: Smoke test the generated CLI
+        run: |
+          node dist/index.js --help
+          node dist/index.js account --help
+          node dist/index.js account health get

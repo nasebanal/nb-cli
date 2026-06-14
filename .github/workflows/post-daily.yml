@@ -1,0 +1,72 @@
+name: Post Metrics — Daily
+
+# DORA Deploy Frequency: count of commits landed on main in the past
+# 24h (= deploy events under our "merge to main = deploy" model). Runs
+# at 00:05 UTC every day so we cover yesterday's full 00:00–23:59 UTC.
+#
+# Posts ZERO on quiet days too — this is intentional. Skipping zero days
+# would let line charts connect across droughts and hide them. Posting 0
+# makes "no deploys" visually obvious.
+
+on:
+  schedule:
+    - cron: '5 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  post-deploy-count:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Count commits to main in last 24h
+        id: count
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # UTC window: yesterday 00:00:00 (inclusive) -> today 00:00:00 (exclusive).
+          # Using --iso-8601=seconds so the GH API parses unambiguously.
+          SINCE=$(date -u -d 'yesterday 00:00' --iso-8601=seconds)
+          UNTIL=$(date -u -d 'today 00:00' --iso-8601=seconds)
+
+          # --paginate handles the (very unlikely) >100 commits/day case.
+          # `--jq '. | length'` per page would undercount with paging, so
+          # capture pages first then count once.
+          COMMITS=$(gh api --paginate \
+            "repos/${{ github.repository }}/commits?sha=main&since=${SINCE}&until=${UNTIL}&per_page=100" \
+            --jq '.[].sha')
+          if [ -z "$COMMITS" ]; then
+            COUNT=0
+          else
+            COUNT=$(echo "$COMMITS" | wc -l | tr -d ' ')
+          fi
+
+          echo "count=$COUNT"   >> "$GITHUB_OUTPUT"
+          echo "since=$SINCE"   >> "$GITHUB_OUTPUT"
+          echo "until=$UNTIL"   >> "$GITHUB_OUTPUT"
+          echo "Deploys to main between $SINCE and $UNTIL: $COUNT"
+
+      - name: Post Deploy count
+        env:
+          SYSTEM_PAT: ${{ secrets.SYSTEM_PAT }}
+          RECORDER_URL: ${{ vars.RECORDER_URL }}
+          REPO_FULL: ${{ github.repository }}
+          COUNT: ${{ steps.count.outputs.count }}
+          SINCE: ${{ steps.count.outputs.since }}
+          UNTIL: ${{ steps.count.outputs.until }}
+        run: |
+          set -e
+          REPO="${REPO_FULL##*/}"
+          curl -fsS -X POST "${RECORDER_URL}/api/v1/records" \
+            -H "Authorization: Bearer ${SYSTEM_PAT}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"System/DORA/${REPO}/Deploy\",
+              \"unit\": \"deploys/day\",
+              \"data_type\": \"integer\",
+              \"chart_type\": \"line\",
+              \"value\": ${COUNT},
+              \"comment\": \"window=${SINCE}..${UNTIL}\"
+            }"

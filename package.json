@@ -1,0 +1,46 @@
+{
+  "name": "@nasebanal/cli",
+  "version": "0.1.0",
+  "description": "gcloud-style command-line interface for NASEBANAL APIs, generated from nb-api-specs OpenAPI contracts.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "nb": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "specs"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "sync-specs": "node scripts/sync-specs.mjs",
+    "build": "npm run sync-specs && tsc -p tsconfig.json",
+    "dev": "node --import tsx src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.8"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nasebanal/nb-cli"
+  },
+  "keywords": [
+    "nasebanal",
+    "cli",
+    "openapi",
+    "cdd",
+    "api-client"
+  ]
+}

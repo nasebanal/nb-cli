@@ -1,0 +1,286 @@
+name: Post Metrics — On Deploy
+
+# Per-push (= per merge to main) metrics. Three parallel jobs:
+#
+#   post-leadtime       — DORA Lead Time for Changes. Looks up the merged
+#                         PR for this commit and posts hours from PR
+#                         creation to merge. Skipped for direct pushes.
+#
+#   post-code-snapshot  — code growth + complexity per push.
+#                         Posts: PushDelta (net lines added in THIS push),
+#                                Lines (HEAD total LOC),
+#                                BranchDensity (branches per 100 lines,
+#                                cyclomatic-complexity proxy from
+#                                bin/count_lines.sh).
+#
+#   post-d1-snapshot    — D1 schema size per push. Applies all migrations
+#                         to a throwaway sqlite db, then counts user
+#                         tables and total columns. Skipped silently for
+#                         repos that don't have src/db/migrations.
+#
+# Deploy COUNT is intentionally NOT here — that's a daily aggregate
+# in post-daily.yml (gives a chart that varies in height instead of a
+# flat y=1 step line).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read   # required for gh api commits/.../pulls
+
+jobs:
+  post-leadtime:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find merged PR for this commit
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # `gh api` resolves the PR(s) associated with the merge commit.
+          # Squash- and rebase-merges leave a single commit on main with a
+          # detectable PR linkage; merge commits work too. Direct pushes
+          # return [] — handled below.
+          PR_JSON=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            -H "Accept: application/vnd.github+json" 2>/dev/null || echo "[]")
+
+          PR_NUM=$(echo "$PR_JSON" | jq -r '.[0].number // empty')
+          if [ -z "$PR_NUM" ]; then
+            echo "No PR linked to ${{ github.sha }} (direct push?). Skipping LeadTime." >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CREATED=$(echo "$PR_JSON" | jq -r '.[0].created_at')
+          MERGED=$(echo "$PR_JSON" | jq -r '.[0].merged_at')
+          if [ -z "$MERGED" ] || [ "$MERGED" = "null" ]; then
+            echo "PR #${PR_NUM} found but has no merged_at. Skipping." >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          LEAD_SECONDS=$(( $(date -d "$MERGED" +%s) - $(date -d "$CREATED" +%s) ))
+          LEAD_HOURS=$(awk "BEGIN { printf \"%.2f\", $LEAD_SECONDS / 3600 }")
+
+          echo "pr_num=$PR_NUM"       >> "$GITHUB_OUTPUT"
+          echo "lead_hours=$LEAD_HOURS" >> "$GITHUB_OUTPUT"
+          echo "skip=false"           >> "$GITHUB_OUTPUT"
+
+      - name: Post LeadTime
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          SYSTEM_PAT: ${{ secrets.SYSTEM_PAT }}
+          RECORDER_URL: ${{ vars.RECORDER_URL }}
+          REPO_FULL: ${{ github.repository }}
+          LEAD_HOURS: ${{ steps.pr.outputs.lead_hours }}
+          PR_NUM: ${{ steps.pr.outputs.pr_num }}
+        run: |
+          set -e
+          REPO="${REPO_FULL##*/}"
+          curl -fsS -X POST "${RECORDER_URL}/api/v1/records" \
+            -H "Authorization: Bearer ${SYSTEM_PAT}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"System/DORA/${REPO}/LeadTime\",
+              \"unit\": \"hours\",
+              \"data_type\": \"decimal\",
+              \"chart_type\": \"line\",
+              \"value\": ${LEAD_HOURS},
+              \"comment\": \"PR #${PR_NUM}\"
+            }"
+
+  post-code-snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Need history that reaches `github.event.before` so the per-push
+          # diff is computable. fetch-depth: 0 = full clone — wasteful for
+          # huge repos but reliable for the sizes we have here.
+          fetch-depth: 0
+
+      - name: Compute per-push delta + HEAD snapshot
+        id: code
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -e
+          # File extensions counted, matching bin/count_lines.sh defaults.
+          PATHSPECS=( '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' )
+
+          # ── 1) PushDelta = net lines added in BEFORE..AFTER for code files.
+          # `before` is all-zeros on the very first push to a branch — treat
+          # that as no measurable delta to avoid surprising "millions added"
+          # records when a repo is initially populated.
+          if [[ "$BEFORE" =~ ^0+$ ]]; then
+            DELTA=0
+            DELTA_NOTE="initial push (no baseline)"
+          else
+            DELTA=$(git log --no-merges --numstat --pretty=format: "${BEFORE}..${AFTER}" \
+              -- "${PATHSPECS[@]}" \
+              | awk '/^[0-9]+\t[0-9]+/ { add+=$1; del+=$2 } END { print (add+0) - (del+0) }')
+            : "${DELTA:=0}"
+            DELTA_NOTE="${BEFORE:0:7}..${AFTER:0:7}"
+          fi
+
+          # ── 2) Lines = total LOC at HEAD across tracked code files.
+          # `git ls-files` enumerates only tracked files (no node_modules,
+          # build artifacts, etc.). `wc -l` of nothing prints 0.
+          LINES=$(git ls-files -z -- "${PATHSPECS[@]}" \
+            | xargs -0 -I{} wc -l {} 2>/dev/null \
+            | awk '{ sum += $1 } END { print (sum+0) }')
+
+          # ── 3) Branches = cyclomatic-complexity proxy. Pattern lifted
+          # verbatim from bin/count_lines.sh: keywords if/else if/for/while/
+          # case/catch + logical && / || + ternary `?` followed by space/(.
+          BRANCH_PATTERN='\b(if|else if|for|while|case|catch)\b|&&|\|\||\?[[:space:](]'
+          BRANCHES=$(git ls-files -z -- "${PATHSPECS[@]}" \
+            | xargs -0 grep -hoE "$BRANCH_PATTERN" 2>/dev/null \
+            | wc -l | tr -d ' ')
+          : "${BRANCHES:=0}"
+
+          # ── 4) BranchDensity = branches per 100 lines (matches
+          # bin/count_lines.sh's "br/100ln" column). Empty repos -> 0.
+          if [ "$LINES" -gt 0 ]; then
+            DENSITY=$(awk "BEGIN { printf \"%.2f\", $BRANCHES * 100 / $LINES }")
+          else
+            DENSITY="0.00"
+          fi
+
+          echo "delta=$DELTA"            >> "$GITHUB_OUTPUT"
+          echo "delta_note=$DELTA_NOTE"  >> "$GITHUB_OUTPUT"
+          echo "lines=$LINES"            >> "$GITHUB_OUTPUT"
+          echo "branches=$BRANCHES"      >> "$GITHUB_OUTPUT"
+          echo "density=$DENSITY"        >> "$GITHUB_OUTPUT"
+
+          echo "Push delta: $DELTA lines ($DELTA_NOTE)"
+          echo "HEAD snapshot: $LINES lines, $BRANCHES branches, $DENSITY br/100ln"
+
+      - name: Post code metrics
+        env:
+          SYSTEM_PAT: ${{ secrets.SYSTEM_PAT }}
+          RECORDER_URL: ${{ vars.RECORDER_URL }}
+          REPO_FULL: ${{ github.repository }}
+          DELTA: ${{ steps.code.outputs.delta }}
+          DELTA_NOTE: ${{ steps.code.outputs.delta_note }}
+          LINES: ${{ steps.code.outputs.lines }}
+          DENSITY: ${{ steps.code.outputs.density }}
+          PR_NUM: ${{ steps.pr.outputs.pr_num }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -e
+          REPO="${REPO_FULL##*/}"
+          COMMENT="sha=${SHA:0:7} ${DELTA_NOTE}"
+
+          post() {
+            local name="$1" unit="$2" dtype="$3" chart="$4" value="$5" comment="$6"
+            curl -fsS -X POST "${RECORDER_URL}/api/v1/records" \
+              -H "Authorization: Bearer ${SYSTEM_PAT}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"name\": \"$name\",
+                \"unit\": \"$unit\",
+                \"data_type\": \"$dtype\",
+                \"chart_type\": \"$chart\",
+                \"value\": $value,
+                \"comment\": \"$comment\"
+              }"
+          }
+
+          post "System/Code/${REPO}/PushDelta"     "lines"      "integer" "line" "$DELTA"   "$COMMENT"
+          post "System/Code/${REPO}/Lines"         "lines"      "integer" "line" "$LINES"   "$COMMENT"
+          post "System/Code/${REPO}/BranchDensity" "br/100ln"   "decimal" "line" "$DENSITY" "$COMMENT"
+
+  post-d1-snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compute D1 schema snapshot
+        id: schema
+        run: |
+          set -e
+          # API repos store D1 migrations under src/db/migrations. Frontend
+          # repos don't, so for them this whole job no-ops cleanly.
+          if ! ls src/db/migrations/*.sql >/dev/null 2>&1; then
+            echo "No src/db/migrations/*.sql in this repo — skipping D1 snapshot." >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Apply migrations in numeric order to a throwaway sqlite file.
+          # Some migrations contain DML or D1-specific PRAGMAs; surface them
+          # as warnings rather than failing the whole job (count what we got).
+          TEMP_DB=$(mktemp)
+          FAILED=0
+          for f in $(ls src/db/migrations/*.sql | sort); do
+            if ! sqlite3 "$TEMP_DB" < "$f" 2>/tmp/sqlerr; then
+              echo "::warning::Failed to apply $(basename "$f"):"
+              sed 's/^/  /' /tmp/sqlerr
+              FAILED=$((FAILED + 1))
+            fi
+          done
+
+          # Exclude sqlite_* internals and *_old (transient rename targets
+          # left mid-migration in the rename-then-recreate pattern used by
+          # nb-recorder-api migration 0033 and friends; they're dropped at
+          # the end of the migration and shouldn't count toward live schema).
+          TABLE_QUERY="SELECT name FROM sqlite_master
+                       WHERE type='table'
+                         AND name NOT LIKE 'sqlite_%'
+                         AND name NOT LIKE '%_old';"
+
+          TABLES=$(sqlite3 "$TEMP_DB" "$TABLE_QUERY" | wc -l | tr -d ' ')
+
+          # pragma_table_info is a per-table table-valued function; iterate.
+          COLUMNS=0
+          for t in $(sqlite3 "$TEMP_DB" "$TABLE_QUERY"); do
+            n=$(sqlite3 "$TEMP_DB" "SELECT COUNT(*) FROM pragma_table_info('$t');")
+            COLUMNS=$((COLUMNS + n))
+          done
+
+          rm -f "$TEMP_DB" /tmp/sqlerr
+
+          echo "tables=$TABLES"           >> "$GITHUB_OUTPUT"
+          echo "columns=$COLUMNS"         >> "$GITHUB_OUTPUT"
+          echo "failed_migrations=$FAILED" >> "$GITHUB_OUTPUT"
+          echo "skip=false"               >> "$GITHUB_OUTPUT"
+
+          echo "D1 schema: $TABLES tables, $COLUMNS columns (failed migrations: $FAILED)"
+
+      - name: Post D1 schema metrics
+        if: steps.schema.outputs.skip != 'true'
+        env:
+          SYSTEM_PAT: ${{ secrets.SYSTEM_PAT }}
+          RECORDER_URL: ${{ vars.RECORDER_URL }}
+          REPO_FULL: ${{ github.repository }}
+          TABLES: ${{ steps.schema.outputs.tables }}
+          COLUMNS: ${{ steps.schema.outputs.columns }}
+          FAILED: ${{ steps.schema.outputs.failed_migrations }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -e
+          REPO="${REPO_FULL##*/}"
+          COMMENT="sha=${SHA:0:7} failed_migrations=${FAILED}"
+
+          post() {
+            local name="$1" unit="$2" value="$3"
+            curl -fsS -X POST "${RECORDER_URL}/api/v1/records" \
+              -H "Authorization: Bearer ${SYSTEM_PAT}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"name\": \"$name\",
+                \"unit\": \"$unit\",
+                \"data_type\": \"integer\",
+                \"chart_type\": \"line\",
+                \"value\": $value,
+                \"comment\": \"$COMMENT\"
+              }"
+          }
+
+          post "System/D1/${REPO}/Tables"  "tables"  "$TABLES"
+          post "System/D1/${REPO}/Columns" "columns" "$COLUMNS"
