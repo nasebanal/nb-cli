@@ -32,7 +32,7 @@ import { readFileSync } from "node:fs";
 import type { ApiEntry } from "../apis.js";
 import { loadSpec, type HttpMethod, type OpenApiOperation, type OpenApiSpec } from "./loader.js";
 import { resolveBaseUrl, request } from "../http.js";
-import { resolveToken, resolveEnv, type Environment } from "../config.js";
+import { resolveAccessToken, resolveEnv, type Environment } from "../config.js";
 import { printJson } from "../output.js";
 
 const METHODS: HttpMethod[] = ["get", "post", "put", "patch", "delete"];
@@ -132,8 +132,12 @@ function attachLeaf(
     const opts = command.optsWithGlobals() as Record<string, string | undefined>;
 
     const env: Environment = (opts.env as Environment) || resolveEnv();
-    const token = (opts.token as string | undefined) || resolveToken();
-    const baseUrl = resolveBaseUrl(servers, env);
+    const token = (opts.token as string | undefined) || (await resolveAccessToken());
+    // NB_BASE_URL overrides server resolution entirely (origin only — the spec
+    // path is still appended). Used by the CDD contract test to point the CLI at
+    // a Specmatic stub, and available for advanced/self-hosted setups.
+    const override = process.env.NB_BASE_URL?.replace(/\/$/, "");
+    const baseUrl = override ?? resolveBaseUrl(servers, env);
 
     let realPath = pathTemplate;
     params.forEach((p, i) => {
