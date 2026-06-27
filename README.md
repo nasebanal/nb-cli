@@ -1,4 +1,4 @@
-# nb-cli
+# NASEBANAL CLI
 
 `nb` — a gcloud-style command-line interface for the NASEBANAL APIs.
 
