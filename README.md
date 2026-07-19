@@ -15,6 +15,16 @@ $ nb target shares accept <id>
 $ nb account me tokens create --data '{"name":"ci"}'
 ```
 
+## Tech Stack
+
+- **Language:** TypeScript (ESM, Node ≥ 20)
+- **CLI framework:** commander
+- **Spec parsing:** yaml
+- **Contracts:** `@nasebanal/api-specs-*` (OpenAPI 3.0) — the same packages backends and frontends consume
+- **Authentication:** browser/device-code Auth0 login, or a NASEBANAL Personal Access Token (`nbpat_…`)
+- **Testing:** Vitest
+- **Distribution:** npm (`npx @nasebanal/cli`); single-binary builds are a planned follow-up
+
 ## Installation
 
 The CLI installs the `nb` command. Node ≥ 20 is required.
@@ -68,42 +78,6 @@ nb auth login          # browser login (see Authentication below)
 nb account me get      # verify the token works against a real API
 ```
 
-## Tech Stack
-
-- **Language:** TypeScript (ESM, Node ≥ 20)
-- **CLI framework:** commander
-- **Spec parsing:** yaml
-- **Contracts:** `@nasebanal/api-specs-*` (OpenAPI 3.0) — the same packages backends and frontends consume
-- **Authentication:** browser/device-code Auth0 login, or a NASEBANAL Personal Access Token (`nbpat_…`)
-- **Testing:** Vitest
-- **Distribution:** npm (`npx @nasebanal/cli`); single-binary builds are a planned follow-up
-
-## Directory Structure
-
-```
-nb-cli/
-├── src/
-│   ├── index.ts            # Entry: global options, auth group, one group per API (★)
-│   ├── apis.ts             # API catalog (★ register new APIs here)
-│   ├── auth.ts             # `nb auth login | logout | status`
-│   ├── oauth.ts            # Auth0 loopback + device-code login, PKCE, token refresh
-│   ├── config.ts           # credentials + environment persisted to ~/.config/nasebanal/config.json
-│   ├── http.ts             # base-URL resolution + bearer request layer
-│   ├── output.ts           # JSON / error formatting
-│   └── spec/
-│       ├── loader.ts       # read + parse spec YAML from specs/
-│       ├── build.ts        # ★ OpenAPI -> commander command tree (the core mapping)
-│       └── build.test.ts   # command-mapping tests
-├── scripts/
-│   └── sync-specs.mjs      # Copy specs into specs/ (local dev convenience)
-├── specs/                  # ★ Generated: OpenAPI specs, not committed (see below)
-├── package.json
-├── tsconfig.json
-└── README.md
-```
-
-Files marked with ★ are the usual customization targets.
-
 ## Command Mapping
 
 The specs carry no `operationId` yet, so commands are derived deterministically
@@ -128,27 +102,6 @@ When two operations collapse to the same command (e.g. `/shares/accept` and
 > When the specs gain `operationId` / `x-cli-name` hints, `src/spec/build.ts` is
 > the single place that consumes them. Adding those hints is the recommended way
 > to refine command names without touching the CLI.
-
-## Local Development
-
-```bash
-npm install
-npm run sync-specs      # copy specs from a sibling nb-api-specs checkout into specs/
-npm run dev -- --help   # run from source (tsx), e.g. `npm run dev -- account me get`
-npm run build           # sync specs + type-check + emit dist/
-npm test                # Vitest
-npm run typecheck       # tsc --noEmit
-```
-
-`sync-specs` resolves each spec from, in order:
-
-1. `node_modules/@nasebanal/api-specs-<api>/spec.yaml` (installed package), then
-2. `../nb-api-specs/packages/<api>/spec.yaml` (local monorepo checkout).
-
-In production the published `@nasebanal/api-specs-*` packages are pinned as
-dependencies — the consumer side of CDD. In local dev we copy straight from the
-sibling repo so contract edits are visible without a publish (mirroring how
-`@nasebanal/shared-navigation` has both a published and a local-copy path).
 
 ## Authentication
 
@@ -214,7 +167,56 @@ The active environment defaults to `production`; `--env local` targets the
 2. Add an entry to `API_CATALOG` in `src/apis.ts` and to the list in `scripts/sync-specs.mjs`.
 3. `npm run sync-specs && npm run build` — the command group appears automatically.
 
-## Conventions
+## Project Structure
+
+```
+nb-cli/
+├── src/
+│   ├── index.ts            # Entry: global options, auth group, one group per API (★)
+│   ├── apis.ts             # API catalog (★ register new APIs here)
+│   ├── auth.ts             # `nb auth login | logout | status`
+│   ├── oauth.ts            # Auth0 loopback + device-code login, PKCE, token refresh
+│   ├── config.ts           # credentials + environment persisted to ~/.config/nasebanal/config.json
+│   ├── http.ts             # base-URL resolution + bearer request layer
+│   ├── output.ts           # JSON / error formatting
+│   └── spec/
+│       ├── loader.ts       # read + parse spec YAML from specs/
+│       ├── build.ts        # ★ OpenAPI -> commander command tree (the core mapping)
+│       └── build.test.ts   # command-mapping tests
+├── scripts/
+│   └── sync-specs.mjs      # Copy specs into specs/ (local dev convenience)
+├── specs/                  # ★ Generated: OpenAPI specs, not committed (see below)
+├── package.json
+├── tsconfig.json
+└── README.md
+```
+
+Files marked with ★ are the usual customization targets.
+
+## Development
+
+### Local Development
+
+```bash
+npm install
+npm run sync-specs      # copy specs from a sibling nb-api-specs checkout into specs/
+npm run dev -- --help   # run from source (tsx), e.g. `npm run dev -- account me get`
+npm run build           # sync specs + type-check + emit dist/
+npm test                # Vitest
+npm run typecheck       # tsc --noEmit
+```
+
+`sync-specs` resolves each spec from, in order:
+
+1. `node_modules/@nasebanal/api-specs-<api>/spec.yaml` (installed package), then
+2. `../nb-api-specs/packages/<api>/spec.yaml` (local monorepo checkout).
+
+In production the published `@nasebanal/api-specs-*` packages are pinned as
+dependencies — the consumer side of CDD. In local dev we copy straight from the
+sibling repo so contract edits are visible without a publish (mirroring how
+`@nasebanal/shared-navigation` has both a published and a local-copy path).
+
+### Conventions
 
 - **The command surface is generated, not hand-written** — refine commands by
   improving the contract (e.g. add `operationId`), not by special-casing the CLI.
@@ -222,3 +224,7 @@ The active environment defaults to `production`; `--env local` targets the
   pins the published `@nasebanal/api-specs-*` packages.
 - **Never commit a PAT** — config lives outside the repo; CI uses `NB_TOKEN`.
 - **Deploy/release via PR merge and CI** — never publish from a local machine.
+
+## License
+
+MIT
