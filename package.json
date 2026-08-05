@@ -42,5 +42,8 @@
     "openapi",
     "cdd",
     "api-client"
-  ]
+  ],
+  "overrides": {
+    "postcss": "^8.5.18"
+  }
 }

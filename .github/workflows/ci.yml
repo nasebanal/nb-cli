@@ -20,7 +20,34 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Audit dependencies
-        run: npm audit --audit-level=high
+        # Fail on any high/critical advisory EXCEPT those allowlisted below.
+        # Allowlisted:
+        #   GHSA-mh99-v99m-4gvg (brace-expansion DoS) — only reachable via
+        #   build/dev tooling (eslint, opennext's @node-minify), never the
+        #   deployed Worker runtime. Its sole patch (5.0.8) is ESM-named-export
+        #   only and crashes the minimatch@3/8/9 those tools require, and there
+        #   is no 1.x/2.x backport, so no non-breaking dependency fix exists yet.
+        #   Re-evaluate when eslint + opennext adopt minimatch@10: drop the
+        #   allowlist entry and let the audit go fully clean.
+        run: |
+          npm audit --audit-level=high --json > audit.json || true
+          node -e '
+            const a = require("./audit.json");
+            const allow = new Set(["GHSA-mh99-v99m-4gvg"]);
+            const id = u => (u || "").split("/").pop();
+            const bad = Object.values(a.vulnerabilities || {}).filter(v =>
+              ["high", "critical"].includes(v.severity) &&
+              (v.via || []).some(x => typeof x === "object" && !allow.has(id(x.url)))
+            );
+            if (bad.length) {
+              console.error("Blocking high/critical advisories (not allowlisted):");
+              for (const b of bad) console.error("  -", b.name, "=>",
+                (b.via || []).filter(x => typeof x === "object").map(x => id(x.url)).join(", "));
+              process.exit(1);
+            }
+            console.log("Audit OK — only allowlisted advisories remain (brace-expansion GHSA-mh99-v99m-4gvg).");
+          '
+          rm -f audit.json
 
       - name: Sync OpenAPI specs
         # No monorepo / private packages in CI — fetch the public specs over HTTP.
