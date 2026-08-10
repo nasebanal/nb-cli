@@ -51,6 +51,24 @@ describe("command mapping", () => {
     expect(t).toHaveLength(1);
   });
 
+  // account 1.2.0 added `DELETE /api/v1/me` next to the existing `GET
+  // /api/v1/me` and `/api/v1/me/tokens`. The singular-write rule wanted to name
+  // the delete `me`, which is the group the other two live under, and commander
+  // threw "cannot add command 'me' as already have command 'me'" — taking the
+  // whole build down rather than mis-naming one command.
+  it("keeps a singular write under its group when the segment is also a group", () => {
+    const a = leaves(account);
+    expect(a).toContain("me delete");
+    expect(a).toContain("me get");
+    expect(a).not.toContain("me");
+  });
+
+  it("still names singular writes after the segment when there is no group", () => {
+    // `PUT /api/v1/me/profile` has nothing nested under it, so it keeps the
+    // segment-as-action name rather than gaining a redundant `replace`.
+    expect(leaves(account)).toContain("me profile");
+  });
+
   it("never emits duplicate command paths", () => {
     for (const api of [account, recorder, target]) {
       const root = buildApiCommand(api);
