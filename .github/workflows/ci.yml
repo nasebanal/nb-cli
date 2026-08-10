@@ -20,20 +20,21 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Audit dependencies
-        # Fail on any high/critical advisory EXCEPT those allowlisted below.
-        # Allowlisted:
-        #   GHSA-mh99-v99m-4gvg (brace-expansion DoS) — only reachable via
-        #   build/dev tooling (eslint, opennext's @node-minify), never the
-        #   deployed Worker runtime. Its sole patch (5.0.8) is ESM-named-export
-        #   only and crashes the minimatch@3/8/9 those tools require, and there
-        #   is no 1.x/2.x backport, so no non-breaking dependency fix exists yet.
-        #   Re-evaluate when eslint + opennext adopt minimatch@10: drop the
-        #   allowlist entry and let the audit go fully clean.
+        # Fail on any high/critical advisory. The allowlist is EMPTY on purpose:
+        # every advisory is currently fixed by a pinned leaf in `overrides`.
+        #
+        # GHSA-mh99-v99m-4gvg (brace-expansion) used to be allowlisted because
+        # its only patch was 5.0.8, which is ESM-named-export only and crashes
+        # the minimatch@3/8/9 that eslint and opennext's @node-minify require.
+        # Patches now exist in EVERY major line (1.1.18 / 2.1.4 / 5.0.9), so the
+        # override pins each range within its own major and nothing has to be
+        # tolerated. Keep it that way: add to `overrides` before reaching for an
+        # allowlist entry.
         run: |
           npm audit --audit-level=high --json > audit.json || true
           node -e '
             const a = require("./audit.json");
-            const allow = new Set(["GHSA-mh99-v99m-4gvg"]);
+            const allow = new Set([]); // 空を維持すること（上のコメント参照）
             const id = u => (u || "").split("/").pop();
             const bad = Object.values(a.vulnerabilities || {}).filter(v =>
               ["high", "critical"].includes(v.severity) &&
@@ -45,7 +46,7 @@ jobs:
                 (b.via || []).filter(x => typeof x === "object").map(x => id(x.url)).join(", "));
               process.exit(1);
             }
-            console.log("Audit OK — only allowlisted advisories remain (brace-expansion GHSA-mh99-v99m-4gvg).");
+            console.log("Audit OK — no high/critical advisories.");
           '
           rm -f audit.json
 
