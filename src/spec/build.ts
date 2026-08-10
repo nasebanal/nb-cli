@@ -184,6 +184,34 @@ export function buildApiCommand(api: ApiEntry): Command {
     }
   }
 
+  // A write on a singular segment is named after the segment itself, so that
+  // `POST /me/accept-terms` reads as `me accept-terms`. That breaks down when
+  // the same segment is ALSO a group: `DELETE /api/v1/me` wants the leaf `me`
+  // while `GET /api/v1/me` and `GET /api/v1/me/tokens` want a group `me`, and
+  // commander rejects the second registration outright ("cannot add command
+  // 'me' as already have command 'me'"). Account deletion introduced exactly
+  // that shape in account 1.2.0 and took the whole CLI build down with it.
+  //
+  // Any chain that is a strict prefix of another chain is such a case; give it
+  // its verb back (`me delete`), which is what the non-colliding paths already
+  // look like. An entry is only re-keyed if the verb form is still free, so a
+  // real operation already sitting there is never displaced.
+  const chains = [...byChain.keys()].map((k) => k.split(" "));
+  const isGroupElsewhere = (chain: string[]) =>
+    chains.some(
+      (other) => other.length > chain.length && chain.every((s, i) => other[i] === s),
+    );
+
+  for (const entry of [...byChain.values()]) {
+    if (!isGroupElsewhere(entry.chain)) continue;
+    const verb = entry.method === "get" ? "get" : PLURAL_VERB[entry.method];
+    const renamed = [...entry.chain, verb];
+    const key = renamed.join(" ");
+    if (byChain.has(key)) continue;
+    byChain.delete(entry.chain.join(" "));
+    byChain.set(key, { ...entry, chain: renamed });
+  }
+
   for (const { chain, path, method, op } of byChain.values()) {
     const leafName = chain[chain.length - 1];
     let parent = root;
