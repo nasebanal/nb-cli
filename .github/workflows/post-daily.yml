@@ -1,8 +1,25 @@
 name: Post Metrics — Daily
 
-# DORA Deploy Frequency: count of commits landed on main in the past
-# 24h (= deploy events under our "merge to main = deploy" model). Runs
-# at 00:05 UTC every day so we cover yesterday's full 00:00–23:59 UTC.
+# DORA Deploy Frequency: count of commits landed on main per day (=
+# deploy events under our "merge to main = deploy" model).
+#
+# The METRIC is still daily — one data point per calendar day. What
+# changed (2026-08-25) is the RUN cadence: this used to fire every day,
+# which cost 12 private repos x 1 billed minute x ~31 days ~= 370 Actions
+# minutes a month and ate ~19% of the org's 2,000-minute free tier on its
+# own. On 2026-08-22 the tier ran out and every workflow in the org — CI
+# and deploys included — stopped starting.
+#
+# So it now runs WEEKLY and posts the whole week in one job, giving each
+# record an explicit `recorded_at` instead of letting the API stamp it at
+# insert time. Same 7 data points, 1/7th the runs (~52 min/month).
+#
+# `recorded_at` deliberately reproduces the old off-by-one: the daily run
+# for window D fired on D+1 and got stamped D+1, so every historical point
+# sits one day after the day it counts. Keeping that convention means the
+# weekly points line up with months of existing history instead of putting
+# a one-day kink (and a duplicated day) in the charts. The `comment` field
+# carries the true window, as it always has.
 #
 # Posts ZERO on quiet days too — this is intentional. Skipping zero days
 # would let line charts connect across droughts and hide them. Posting 0
@@ -10,8 +27,13 @@ name: Post Metrics — Daily
 
 on:
   schedule:
-    - cron: '5 0 * * *'
+    - cron: '5 0 * * 1'
   workflow_dispatch:
+    inputs:
+      days:
+        description: 'How many days back to post (use to backfill a gap)'
+        required: false
+        default: '7'
 
 permissions:
   contents: read
@@ -20,53 +42,72 @@ jobs:
   post-deploy-count:
     runs-on: ubuntu-latest
     steps:
-      - name: Count commits to main in last 24h
+      - name: Count commits to main per day
         id: count
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL: ${{ github.repository }}
+          DAYS_INPUT: ${{ github.event.inputs.days }}
         run: |
           set -e
-          # UTC window: yesterday 00:00:00 (inclusive) -> today 00:00:00 (exclusive).
-          # Using --iso-8601=seconds so the GH API parses unambiguously.
-          SINCE=$(date -u -d 'yesterday 00:00' --iso-8601=seconds)
+          # Empty on a schedule trigger, so `:-` (not `-`) supplies the default.
+          DAYS="${DAYS_INPUT:-7}"
+
+          # One window covering every day we're about to post, so this is a
+          # single paginated API call rather than one per day.
+          # UTC: N days ago 00:00:00 (inclusive) -> today 00:00:00 (exclusive).
+          SINCE=$(date -u -d "${DAYS} days ago 00:00" --iso-8601=seconds)
           UNTIL=$(date -u -d 'today 00:00' --iso-8601=seconds)
 
-          # --paginate handles the (very unlikely) >100 commits/day case.
-          # `--jq '. | length'` per page would undercount with paging, so
-          # capture pages first then count once.
-          COMMITS=$(gh api --paginate \
-            "repos/${{ github.repository }}/commits?sha=main&since=${SINCE}&until=${UNTIL}&per_page=100" \
-            --jq '.[].sha')
-          if [ -z "$COMMITS" ]; then
-            COUNT=0
-          else
-            COUNT=$(echo "$COMMITS" | wc -l | tr -d ' ')
-          fi
+          # since/until on the commits API filter on COMMITTER date, so bucket
+          # by that same field or the edges of the window disagree.
+          # --paginate handles the (very unlikely) >100 commits/page case.
+          COMMIT_DATES=$(gh api --paginate \
+            "repos/${REPO_FULL}/commits?sha=main&since=${SINCE}&until=${UNTIL}&per_page=100" \
+            --jq '.[].commit.committer.date')
 
-          echo "count=$COUNT"   >> "$GITHUB_OUTPUT"
-          echo "since=$SINCE"   >> "$GITHUB_OUTPUT"
-          echo "until=$UNTIL"   >> "$GITHUB_OUTPUT"
-          echo "Deploys to main between $SINCE and $UNTIL: $COUNT"
+          echo "Commits in ${SINCE}..${UNTIL}: $(printf '%s' "$COMMIT_DATES" | grep -c . || true)"
 
-      - name: Post Deploy count
+          # One "day<TAB>count<TAB>recorded_at<TAB>next-day" line per day,
+          # oldest first, for the posting step to read.
+          : > /tmp/daily-counts.tsv
+          for i in $(seq "$DAYS" -1 1); do
+            DAY=$(date -u -d "${i} days ago" +%Y-%m-%d)
+            NEXT=$(date -u -d "$((i - 1)) days ago" +%Y-%m-%d)
+            # grep exits 1 on no match; `|| true` keeps `set -e` from firing.
+            COUNT=$(printf '%s\n' "$COMMIT_DATES" | grep -c "^${DAY}" || true)
+            # Z form, not `date --iso-8601`'s +00:00 — the API used to stamp
+            # these with toISOString(), and Recorder compares recorded_at as a
+            # plain string in places, so a second format would sort wrong.
+            STAMP="${NEXT}T00:05:00Z"
+            printf '%s\t%s\t%s\t%s\n' "$DAY" "$COUNT" "$STAMP" "$NEXT" >> /tmp/daily-counts.tsv
+            echo "  ${DAY}: ${COUNT} deploys (recorded_at=${STAMP})"
+          done
+
+      - name: Post Deploy counts
         env:
           SYSTEM_PAT: ${{ secrets.SYSTEM_PAT }}
           RECORDER_URL: ${{ vars.RECORDER_URL }}
           REPO_FULL: ${{ github.repository }}
-          COUNT: ${{ steps.count.outputs.count }}
-          SINCE: ${{ steps.count.outputs.since }}
-          UNTIL: ${{ steps.count.outputs.until }}
         run: |
           set -e
           REPO="${REPO_FULL##*/}"
-          curl -fsS -X POST "${RECORDER_URL}/api/v1/records" \
-            -H "Authorization: Bearer ${SYSTEM_PAT}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"name\": \"System/DORA/${REPO}/Deploy\",
-              \"unit\": \"deploys/day\",
-              \"data_type\": \"integer\",
-              \"chart_type\": \"line\",
-              \"value\": ${COUNT},
-              \"comment\": \"window=${SINCE}..${UNTIL}\"
-            }"
+
+          while IFS=$'\t' read -r DAY COUNT STAMP NEXT; do
+            [ -n "$DAY" ] || continue
+            # The comment keeps the window the count actually describes, since
+            # recorded_at is deliberately D+1 (see header).
+            curl -fsS -X POST "${RECORDER_URL}/api/v1/records" \
+              -H "Authorization: Bearer ${SYSTEM_PAT}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"name\": \"System/DORA/${REPO}/Deploy\",
+                \"unit\": \"deploys/day\",
+                \"data_type\": \"integer\",
+                \"chart_type\": \"line\",
+                \"value\": ${COUNT},
+                \"recorded_at\": \"${STAMP}\",
+                \"comment\": \"window=${DAY}T00:00:00Z..${NEXT}T00:00:00Z\"
+              }"
+            echo "posted ${DAY} = ${COUNT}"
+          done < /tmp/daily-counts.tsv
