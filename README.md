@@ -55,9 +55,32 @@ needed for a registry install.
 
 Versions follow SemVer (0.x until 1.0: breaking changes bump the minor). Each
 release bundles a fixed set of API contract versions, recorded in
-[`spec-versions.json`](spec-versions.json). A release is cut by pushing a
-`vX.Y.Z` tag that matches `package.json`; the `Release` workflow publishes it to
-npm with provenance.
+[`spec-versions.json`](spec-versions.json).
+
+### Releasing (maintainers)
+
+Published to npmjs.org through npm **trusted publishing** (OIDC): no npm token is
+stored anywhere. The `Release` workflow (`.github/workflows/release.yml`) is
+registered as this package's Trusted Publisher on npmjs.com (repo
+`nasebanal/nb-cli`, workflow `release.yml`, no environment).
+
+1. Bump `version` in `package.json` (PR to `main`, squash-merge). If the pinned
+   contracts changed, update `spec-versions.json` in the same PR — the specs host
+   serves only the latest version, so a stale pin fails `sync-specs` with a 404.
+   Check https://api-specs.nasebanal.com/specs/released.json
+2. Tag the merge commit: `git tag vX.Y.Z && git push origin vX.Y.Z`. The tag must
+   equal `package.json`'s version or the workflow fails.
+3. The workflow type-checks, tests and runs `npm publish --provenance`.
+
+Notes:
+
+- A manual `npm publish` needs `--@nasebanal:registry=https://registry.npmjs.org/`
+  if your `~/.npmrc` maps the `@nasebanal` scope to GitHub Packages (that mapping
+  outranks `publishConfig.registry`; `publishConfig` also pins the scoped key as a
+  safeguard). npm also requires a passkey (WebAuthn) 2FA for interactive publishes.
+- A freshly published version can 404 on the package document for a few minutes
+  while npm's cache catches up; `npm view` with `--prefer-online` or a retry is
+  enough.
 
 ### From source (contributors)
 
