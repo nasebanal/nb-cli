@@ -1,0 +1,54 @@
+name: Release
+
+# Publishes to npmjs.org when a `vX.Y.Z` tag is pushed. The tag must equal
+# package.json's version (checked below) so the tag, the npm version and
+# `--version` output can never disagree.
+#
+# Auth is npm trusted publishing (OIDC) — no long-lived token is stored. It must
+# be enabled once per package on npmjs.com (Settings > Trusted Publisher:
+# repo nasebanal/nb-cli, workflow release.yml). npm only allows that for a package
+# that already exists, so the very first version is published by hand.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for npm trusted publishing + provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24 # npm >= 11.5.1 is required for trusted publishing
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Tag matches package.json version
+        run: |
+          v=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_NAME}" != "v$v" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version $v"
+            exit 1
+          fi
+
+      - run: npm ci
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Sync OpenAPI specs
+        run: npm run sync-specs
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Publish
+        run: npm publish --provenance --access public
