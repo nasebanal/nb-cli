@@ -31,26 +31,33 @@ The CLI installs the `nb` command. Node ≥ 20 is required.
 
 ### From the npm registry (end users)
 
-`@nasebanal/cli` is a scoped package on **GitHub Packages**, so configure the
-registry once, then install. Create or edit `~/.npmrc`:
-
-```ini
-@nasebanal:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}   # a PAT with read:packages
-```
-
-Then:
+`@nasebanal/cli` is published to the public npm registry — no `git clone`, no
+registry configuration, no token:
 
 ```bash
 npm install -g @nasebanal/cli   # global: the `nb` command on your PATH
+nb --version
 nb --help
 
-# or run without installing
-npx @nasebanal/cli account me get
+# or run without installing (pin a version for reproducible scripts)
+npx @nasebanal/cli@0.1.0 account me get
 ```
 
 The published package bundles the OpenAPI specs, so no `nb-api-specs` checkout is
 needed for a registry install.
+
+> **NASEBANAL developers:** if your `~/.npmrc` maps `@nasebanal:registry` to
+> GitHub Packages (needed for the private `@nasebanal/shared-navigation` /
+> `api-specs-*` packages), it captures this package too. Install with
+> `npm install -g @nasebanal/cli --@nasebanal:registry=https://registry.npmjs.org/`.
+
+### Versioning and releases
+
+Versions follow SemVer (0.x until 1.0: breaking changes bump the minor). Each
+release bundles a fixed set of API contract versions, recorded in
+[`spec-versions.json`](spec-versions.json). A release is cut by pushing a
+`vX.Y.Z` tag that matches `package.json`; the `Release` workflow publishes it to
+npm with provenance.
 
 ### From source (contributors)
 

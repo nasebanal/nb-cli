@@ -6,6 +6,7 @@
  * OpenAPI specs in `specs/` (synced from nb-api-specs). This file only wires up
  * the global options, the `auth` group, and one command group per catalog entry.
  */
+import { createRequire } from "node:module";
 import { Command } from "commander";
 import { API_CATALOG } from "./apis.js";
 import { buildApiCommand } from "./spec/build.js";
@@ -13,12 +14,16 @@ import { buildAuthCommand } from "./auth.js";
 import { specExists } from "./spec/loader.js";
 import { printError } from "./output.js";
 
+// Single source of truth for the version: package.json (dist/ and src/ both sit
+// next to it). A hard-coded string here drifts from the release tag.
+const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
+
 const program = new Command();
 
 program
   .name("nb")
   .description("Command-line interface for NASEBANAL APIs (generated from OpenAPI contracts).")
-  .version("0.1.0")
+  .version(version)
   .option("--env <env>", "target environment: production | local")
   .option("--token <token>", "override the stored PAT for this invocation")
   .showHelpAfterError();
