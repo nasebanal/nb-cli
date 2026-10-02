@@ -108,6 +108,7 @@ describe("nb assurance report upload", () => {
     vi.stubEnv("GITHUB_ACTIONS", "true");
     vi.stubEnv("GITHUB_REPOSITORY", "nasebanal/nb-target-api");
     vi.stubEnv("GITHUB_RUN_ID", "555");
+    vi.stubEnv("GITHUB_RUN_ATTEMPT", "1"); // set by Actions itself (2 on a re-run); pin it so the key is stable
     vi.stubEnv("GITHUB_SHA", "abc123");
     vi.stubEnv("GITHUB_REF_NAME", "main");
     await run(["--file", junitFile(), "--kind", "unit", "--tool", "vitest"]);
