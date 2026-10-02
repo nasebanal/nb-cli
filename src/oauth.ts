@@ -28,6 +28,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
 import { randomBytes, createHash } from "node:crypto";
+import { PAGE_HEADERS, pickLang, renderLoginPage } from "./loginPage.js";
 
 const AUTH0_DOMAIN = process.env.NB_AUTH0_DOMAIN || "dev-bv0p1636dyofjbmg.us.auth0.com";
 const AUTH0_AUDIENCE = process.env.NB_AUTH0_AUDIENCE || "https://api.nasebanal.com";
@@ -141,10 +142,6 @@ function tokenError(data: { error?: string; error_description?: string }, fallba
 // Loopback flow
 // ---------------------------------------------------------------------------
 
-const SUCCESS_HTML = `<!doctype html><meta charset="utf-8"><title>NASEBANAL CLI</title>
-<body style="font-family:system-ui;max-width:32rem;margin:4rem auto;text-align:center">
-<h1>✓ Logged in</h1><p>You can close this tab and return to your terminal.</p></body>`;
-
 function listen(server: Server, port: number): Promise<void> {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -171,8 +168,18 @@ function waitForCode(server: Server, expectedState: string, timeoutMs: number): 
       const error = url.searchParams.get("error");
       const code = url.searchParams.get("code");
       const state = url.searchParams.get("state");
-      res.writeHead(error ? 400 : 200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(error ? `Login failed: ${error}. You can close this tab.` : SUCCESS_HTML);
+      // Decide success before answering, so the page never says "Logged in"
+      // for a callback the CLI is about to reject.
+      const failure = error
+        ? error
+        : state !== expectedState
+          ? "state_mismatch"
+          : !code
+            ? "missing_code"
+            : null;
+      const detail = [failure, error ? url.searchParams.get("error_description") : null].filter(Boolean).join(" — ");
+      res.writeHead(failure ? 400 : 200, PAGE_HEADERS);
+      res.end(renderLoginPage({ ok: !failure, lang: pickLang(req.headers["accept-language"]), error: detail }));
       clearTimeout(timer);
       if (error) return reject(tokenError({ error }, "Authorization failed"));
       if (state !== expectedState) return reject(new Error("State mismatch — possible CSRF; aborting."));

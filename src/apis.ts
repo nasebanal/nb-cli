@@ -20,5 +20,6 @@ export const API_CATALOG: ApiEntry[] = [
   { name: "account", spec: "account.yaml", summary: "User profiles, subscriptions, billing, and API tokens" },
   { name: "recorder", spec: "recorder.yaml", summary: "Records and tags (NASEBANAL Recorder)" },
   { name: "target", spec: "target.yaml", summary: "Targets, cells, and shares (NASEBANAL Target)" },
+  { name: "assurance", spec: "assurance.yaml", summary: "Monitors, projects and CI/CD test results (NASEBANAL Assurance)" },
   { name: "app-template", spec: "app-template.yaml", summary: "Reference API surface (App Template)" },
 ];

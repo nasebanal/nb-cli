@@ -13,6 +13,7 @@ import { buildApiCommand } from "./spec/build.js";
 import { buildAuthCommand } from "./auth.js";
 import { specExists } from "./spec/loader.js";
 import { printError } from "./output.js";
+import { buildReportUploadCommand } from "./reports/upload.js";
 
 // Single source of truth for the version: package.json (dist/ and src/ both sit
 // next to it). A hard-coded string here drifts from the release tag.
@@ -48,7 +49,14 @@ for (const api of API_CATALOG) {
       });
     continue;
   }
-  program.addCommand(buildApiCommand(api));
+  const group = buildApiCommand(api);
+  // `assurance report` already holds the generated availability report; the
+  // hand-written `upload` (test-result files -> a project) joins it.
+  if (api.name === "assurance") {
+    const report = group.commands.find((c) => c.name() === "report") ?? group.command("report").description("Reports");
+    report.addCommand(buildReportUploadCommand());
+  }
+  program.addCommand(group);
 }
 
 async function main(): Promise<void> {

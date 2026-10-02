@@ -25,6 +25,49 @@ $ nb account me tokens create --data '{"name":"ci"}'
 - **Testing:** Vitest
 - **Distribution:** npm (`npx @nasebanal/cli`); single-binary builds are a planned follow-up
 
+## Reporting CI/CD test results (Assurance)
+
+`nb assurance report upload` reads a test report on the runner, reduces it to a
+small summary (counts, coverage-free metrics, the first failures) and reports it
+to a NASEBANAL Assurance project. The same line works in a pipeline and on a
+laptop; in CI it needs only a token:
+
+Only these tool / kind pairs are accepted; anything else is refused before
+anything is read or sent (the API enforces the same list):
+
+| `--kind` | `--tool` | Report format |
+|---|---|---|
+| `unit` | `vitest`, `pytest` | JUnit XML |
+| `e2e` | `playwright` | JUnit XML |
+| `contract` | `specmatic` | JUnit XML |
+| `security` | `zap` | JUnit XML |
+| `load` | `locust` | Locust CSV |
+
+```bash
+export NB_TOKEN=nbpat_…        # a PAT or service-account token (no browser needed)
+
+# JUnit XML: vitest (--reporter=junit), pytest (--junitxml), Specmatic, Playwright (--reporter=junit)
+nb assurance report upload --file report/junit.xml --kind unit --tool pytest
+nb assurance report upload --file results/junit.xml --kind e2e --tool playwright --suite web
+
+# Locust (--csv <prefix>): the *_stats.csv, with its *_failures / *_exceptions / *_stats_history siblings
+nb assurance report upload --dir locust/logs/20261001_090000
+```
+
+- **Project:** found by name, created when missing (`--no-create-project` to fail
+  instead). In CI the name defaults to the repository (`GITHUB_REPOSITORY` /
+  `CI_PROJECT_PATH`); elsewhere pass `--project`.
+- **Run:** every job of one pipeline run shares a run key (CI: `GITHUB_RUN_ID` +
+  attempt, `CI_PIPELINE_ID`; locally `local-<sha>-<day>`), so a unit job and an e2e
+  job land in the same run, and re-running a job replaces its own result.
+  Commit, branch and CI URL are detected the same way; override with `--run-key`,
+  `--commit`, `--branch`, `--ci-url`.
+- **Pass / fail:** JUnit - any failed or errored test fails the suite. Locust - an
+  unhandled task exception, or a failure ratio above `--max-fail-ratio` (default
+  `$LOCUST_MAX_FAIL_RATIO`, else 0), fails it - the same rule as nb-quickstarts'
+  `locust/bin/exit_code.py`. `--status passed|failed` overrides either.
+- `--dry-run` prints what would be sent and calls nothing.
+
 ## Installation
 
 The CLI installs the `nb` command. Node ≥ 20 is required.
