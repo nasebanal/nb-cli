@@ -108,27 +108,67 @@ release bundles a fixed set of API contract versions, recorded in
 ### Releasing (maintainers)
 
 Published to npmjs.org through npm **trusted publishing** (OIDC): no npm token is
-stored anywhere. The `Release` workflow (`.github/workflows/release.yml`) is
-registered as this package's Trusted Publisher on npmjs.com (repo
-`nasebanal/nb-cli`, workflow `release.yml`, no environment).
+stored anywhere, and none is needed to run the release script - what gates a release is
+**write access to this repository** (the script pushes a branch and a tag; the `Release`
+workflow then publishes, and npm accepts that only from this repo's `release.yml`). It does
+not work from a fork.
 
-1. Bump `version` in `package.json` (PR to `main`, squash-merge). If the pinned
-   contracts changed, update `spec-versions.json` in the same PR — the specs host
-   serves only the latest version, so a stale pin fails `sync-specs` with a 404.
-   Check https://api-specs.nasebanal.com/specs/released.json
-2. Tag the merge commit: `git tag vX.Y.Z && git push origin vX.Y.Z`. The tag must
-   equal `package.json`'s version or the workflow fails.
-3. The workflow type-checks, tests and runs `npm publish --provenance`.
+Two commands, split by the PR merge (which stays yours; the script never merges):
+
+```bash
+bin/release.sh prepare 0.3.0   # before the merge: checks, version bump, tests, opens the release PR
+# ... review and merge the PR ...
+git checkout main && git pull
+bin/release.sh publish         # after the merge: tags v0.3.0 (asks first), waits for the workflow, checks npm
+```
+
+Add `--dry-run` to either to do every check and print what it would do, writing nothing.
+
+What it checks, and why:
+
+- **Pinned contracts equal `released.json`.** The specs host serves only the latest
+  version, so a stale `spec-versions.json` fails `sync-specs` with a 404 (it happened for
+  `account` 1.4.0 -> 1.5.0). `prepare` stops and lists the differences;
+  `prepare <version> --sync-pins` adopts the released versions in the release PR.
+  Check https://api-specs.nasebanal.com/specs/released.json
+- **Tag equals `package.json`'s version**, or the workflow fails.
+- **The version is newer than `main`'s and not on npm yet**, and the tag does not exist.
+- If the tag is pushed but the version is not on npm (the workflow failed), `publish` says
+  so and prints the `gh run rerun <id> --failed` to carry on - **do not tag again**.
+
+By hand (what the script does): bump `version` in `package.json` and `package-lock.json`
+(PR to `main`, squash-merge), tag the merge commit (`git tag vX.Y.Z && git push origin vX.Y.Z`),
+and the workflow type-checks, tests and runs `npm publish --provenance`.
+
+#### One-time setup: the Trusted Publisher on npmjs.com
+
+Trusted publishing must be switched on by hand, once per package, by a maintainer of
+`@nasebanal/cli` (npm only allows it for a package that already exists, so the first version,
+0.1.0, was published by hand). On https://www.npmjs.com/package/@nasebanal/cli/access ->
+**Trusted Publisher** -> **GitHub Actions**:
+
+| Field | Value |
+|---|---|
+| Organization or user | `nasebanal` |
+| Repository | `nb-cli` |
+| Workflow filename | `release.yml` (the file name only, exact case) |
+| Environment name | empty (the workflow uses none) |
+| Allowed actions | **tick "Allow `npm publish`"**; leave "Allow `npm dist-tag`" unticked |
+
+Without that tick the publish fails with `npm error 404 ... could not be found or you do not
+have permission` on the `PUT` - npm answers 404 for "not allowed", which reads like a missing
+package. (This is how the first run of the workflow, for 0.2.0, failed: the setup was not done.)
 
 Notes:
 
 - A manual `npm publish` needs `--@nasebanal:registry=https://registry.npmjs.org/`
   if your `~/.npmrc` maps the `@nasebanal` scope to GitHub Packages (that mapping
   outranks `publishConfig.registry`; `publishConfig` also pins the scoped key as a
-  safeguard). npm also requires a passkey (WebAuthn) 2FA for interactive publishes.
+  safeguard). npm also requires a passkey (WebAuthn) 2FA for interactive publishes. The
+  same override is needed for `npm view @nasebanal/cli` against the public registry.
 - A freshly published version can 404 on the package document for a few minutes
   while npm's cache catches up; `npm view` with `--prefer-online` or a retry is
-  enough.
+  enough (the script retries for you).
 
 ### From source (contributors)
 
