@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
-import { ALLOWED_TOOLS, buildReportUploadCommand, checkSuite, parseReport } from "./upload.js";
+import { ALLOWED_TOOLS, MAX_CASES, buildReportUploadCommand, checkSuite, parseReport, toCases } from "./upload.js";
 
 const JUNIT = `<testsuites><testsuite name="s"><testcase classname="c" name="a" time="1.5"/><testcase classname="c" name="b"><failure message="nope"/></testcase></testsuite></testsuites>`;
 const LOCUST_STATS =
@@ -73,6 +73,59 @@ const junitFile = () => {
   writeFileSync(f, JUNIT);
   return f;
 };
+
+describe("cases in the payload", () => {
+  it("sends the per-test cases of a JUnit report", () => {
+    const { suite } = parseReport({ format: "junit", kind: "unit", tool: "vitest", maxFailRatio: 0, file: junitFile() });
+    expect(suite.cases).toEqual([
+      { name: "c > a", status: "passed", duration_ms: 1500 },
+      { name: "c > b", status: "failed", message: "nope" },
+    ]);
+  });
+
+  it("sends none for Locust", () => {
+    const f = join(dir, "locust_stats.csv");
+    writeFileSync(f, LOCUST_STATS);
+    const { suite } = parseReport({ format: "locust", kind: "load", tool: "locust", maxFailRatio: 0, file: f });
+    expect(suite.cases).toBeUndefined();
+  });
+
+  it("over the limit keeps failed and skipped tests first, in original order", () => {
+    const list = Array.from({ length: MAX_CASES + 10 }, (_, i) => ({
+      name: `t${i}`,
+      status: (i === MAX_CASES + 5 ? "failed" : i === 3 ? "skipped" : "passed") as "passed" | "failed" | "skipped",
+      duration_ms: null,
+      message: null,
+    }));
+    const out = toCases(list)!;
+    expect(out).toHaveLength(MAX_CASES);
+    expect(out.map((c) => c.name)).toContain(`t${MAX_CASES + 5}`);
+    expect(out.map((c) => c.name)).toContain("t3");
+    expect(out.map((c) => c.name)).not.toContain(`t${MAX_CASES + 9}`);
+    const idx = out.map((c) => Number(c.name.slice(1)));
+    expect(idx).toEqual([...idx].sort((a, b) => a - b));
+  });
+
+  it("clips each message and stops adding message text past the total budget", () => {
+    const list = Array.from({ length: 700 }, (_, i) => ({
+      name: `t${i}`,
+      status: "failed" as const,
+      duration_ms: null,
+      message: "y".repeat(5000),
+    }));
+    const out = toCases(list)!;
+    expect(out).toHaveLength(700);
+    expect(out[0].message!.length).toBe(2000);
+    const total = out.reduce((n, c) => n + (c.message?.length ?? 0), 0);
+    expect(total).toBeLessThanOrEqual(1_000_000);
+    expect(out[699].message).toBeUndefined();
+    expect(out[699].status).toBe("failed");
+  });
+
+  it("returns nothing for an empty list", () => {
+    expect(toCases([])).toBeUndefined();
+  });
+});
 
 describe("parseReport", () => {
   it("derives status and counts from JUnit, and clips to the API's caps", () => {

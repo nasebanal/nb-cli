@@ -17,6 +17,14 @@ export interface SuiteFailure {
   message: string | null;
 }
 
+/** One test, as kept per-case in Assurance (outcome, time, and the failure text when there is one). */
+export interface JunitCase {
+  name: string;
+  status: "passed" | "failed" | "skipped";
+  duration_ms: number | null;
+  message: string | null;
+}
+
 export interface JunitSummary {
   total: number;
   passed: number;
@@ -24,6 +32,8 @@ export interface JunitSummary {
   skipped: number;
   duration_ms: number | null;
   failures: SuiteFailure[];
+  /** Every test case in file order; the caller decides how many to send. */
+  cases: JunitCase[];
 }
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
@@ -54,6 +64,15 @@ interface Case {
   attrs: Record<string, string>;
   state: "passed" | "failed" | "skipped";
   message: string | null;
+  /** Text inside <failure>/<error> (usually the stack trace), first one wins. */
+  trace: string | null;
+}
+
+/** Element text with CDATA unwrapped, or entity-decoded when it is plain text. */
+function elementText(raw: string): string | null {
+  const cdata = [...raw.matchAll(/<!\[CDATA\[([\s\S]*?)\]\]>/g)].map((m) => m[1]);
+  const text = (cdata.length > 0 ? cdata.join("") : decode(raw)).trim();
+  return text === "" ? null : text;
 }
 
 function caseName(attrs: Record<string, string>): string {
@@ -65,11 +84,16 @@ function caseName(attrs: Record<string, string>): string {
 export function parseJunit(xml: string): JunitSummary {
   const cases: Case[] = [];
   let current: Case | null = null;
+  let textFrom = -1; // where the text of the open <failure>/<error> starts
   let firstSuiteTime: number | null = null;
 
   for (const m of xml.matchAll(TAG)) {
     const [, closeName, openName, rawAttrs, selfClose] = m;
     if (closeName) {
+      if ((closeName === "failure" || closeName === "error") && current && textFrom >= 0) {
+        current.trace = current.trace ?? elementText(xml.slice(textFrom, m.index));
+        textFrom = -1;
+      }
       if (closeName === "testcase" && current) {
         cases.push(current);
         current = null;
@@ -84,7 +108,7 @@ export function parseJunit(xml: string): JunitSummary {
         firstSuiteTime = Number(attrs.time);
       }
     } else if (openName === "testcase") {
-      current = { attrs, state: attrs.status === "skipped" ? "skipped" : "passed", message: null };
+      current = { attrs, state: attrs.status === "skipped" ? "skipped" : "passed", message: null, trace: null };
       if (selfClose) {
         cases.push(current);
         current = null;
@@ -92,6 +116,7 @@ export function parseJunit(xml: string): JunitSummary {
     } else if (current && (openName === "failure" || openName === "error")) {
       current.state = "failed";
       current.message = current.message ?? (attrs.message || attrs.type || null);
+      if (!selfClose) textFrom = (m.index ?? 0) + m[0].length;
     } else if (current && openName === "skipped" && current.state !== "failed") {
       current.state = "skipped";
     }
@@ -117,5 +142,16 @@ export function parseJunit(xml: string): JunitSummary {
     skipped,
     duration_ms: seconds > 0 ? Math.round(seconds * 1000) : null,
     failures: failed.map((c) => ({ name: caseName(c.attrs), message: c.message })),
+    cases: cases.map((c) => {
+      const t = Number(c.attrs.time);
+      // The failure text is the attribute plus the trace when the trace adds something.
+      const message = [c.message, c.trace && c.trace !== c.message ? c.trace : null].filter(Boolean).join("\n");
+      return {
+        name: caseName(c.attrs),
+        status: c.state,
+        duration_ms: c.attrs.time !== undefined && Number.isFinite(t) ? Math.round(t * 1000) : null,
+        message: message === "" ? null : message,
+      };
+    }),
   };
 }
