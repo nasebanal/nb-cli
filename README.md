@@ -28,8 +28,8 @@ $ nb account me tokens create --data '{"name":"ci"}'
 ## Reporting CI/CD test results (Assurance)
 
 `nb assurance report upload` reads a test report on the runner, reduces it to a
-small summary (counts, coverage-free metrics, the first failures) and reports it
-to a NASEBANAL Assurance project. The same line works in a pipeline and on a
+small summary (counts, coverage-free metrics, the first failures, and for JUnit
+the per-test cases) and reports it to a NASEBANAL Assurance project. The same line works in a pipeline and on a
 laptop; in CI it needs only a token:
 
 Only these tool / kind pairs are accepted; anything else is refused before
@@ -66,6 +66,11 @@ nb assurance report upload --dir locust/logs/20261001_090000
   unhandled task exception, or a failure ratio above `--max-fail-ratio` (default
   `$LOCUST_MAX_FAIL_RATIO`, else 0), fails it - the same rule as nb-quickstarts'
   `locust/bin/exit_code.py`. `--status passed|failed` overrides either.
+- **Per-test cases (JUnit):** every test is sent with its name, outcome, time and, for a
+  failure, its message plus the stack trace, so the Assurance screens can list them. Up to
+  5000 cases per suite - over that, failed and skipped tests are kept first and passed ones
+  fill the rest; a failure text is clipped to 2000 characters, and about 1 MB of failure text
+  is sent in total (names and outcomes always stay). Locust reports have no cases.
 - `--dry-run` prints what would be sent and calls nothing.
 
 ## Installation

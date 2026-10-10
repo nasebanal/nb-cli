@@ -19,7 +19,7 @@ import { request, resolveBaseUrl, ApiError } from "../http.js";
 import { loadSpec } from "../spec/loader.js";
 import { printJson } from "../output.js";
 import { detectCi, type CiInfo } from "./ci.js";
-import { parseJunit, type SuiteFailure } from "./junit.js";
+import { parseJunit, type JunitCase, type SuiteFailure } from "./junit.js";
 import { summariseLocust } from "./locust.js";
 
 export const SUITE_KINDS = ["unit", "e2e", "load", "contract", "security"] as const;
@@ -60,6 +60,11 @@ export function checkSuite(kind: SuiteKind, tool: string, format: ReportFormat):
 }
 
 const MAX_FAILURES = 20;
+/** Per-test cases: the API accepts this many (MAX_CASES), each message up to 2000 characters. */
+export const MAX_CASES = 5000;
+const MAX_CASE_MESSAGE = 2000;
+/** Total failure text sent across all cases, so a suite where everything fails stays a modest upload. */
+const MAX_CASE_MESSAGE_BUDGET = 1_000_000;
 
 export interface SuitePayload {
   kind: SuiteKind;
@@ -70,6 +75,7 @@ export interface SuitePayload {
   duration_ms?: number;
   metrics?: Record<string, number>;
   failures?: { name: string; message?: string }[];
+  cases?: { name: string; status: "passed" | "failed" | "skipped"; duration_ms?: number; message?: string }[];
 }
 
 export interface ReportPayload {
@@ -91,6 +97,36 @@ function toFailures(list: SuiteFailure[]): SuitePayload["failures"] {
     ...(f.message ? { message: clip(f.message, 500) } : {}),
   }));
   return out.length > 0 ? out : undefined;
+}
+
+/**
+ * The per-test cases to send. Over the limit, failed and skipped tests are kept first (they are
+ * what people open the list for) and passed ones fill the rest, all in their original order.
+ * Failure text is clipped per case and against a total budget; names and outcomes always stay.
+ */
+export function toCases(list: JunitCase[]): SuitePayload["cases"] {
+  if (list.length === 0) return undefined;
+  let keep = list.map((_, i) => i);
+  if (list.length > MAX_CASES) {
+    const notPassed = keep.filter((i) => list[i].status !== "passed");
+    const passed = keep.filter((i) => list[i].status === "passed");
+    keep = [...notPassed, ...passed].slice(0, MAX_CASES).sort((a, b) => a - b);
+  }
+  let budget = MAX_CASE_MESSAGE_BUDGET;
+  return keep.map((i) => {
+    const c = list[i];
+    let message: string | undefined;
+    if (c.message && budget > 0) {
+      message = clip(c.message, Math.min(MAX_CASE_MESSAGE, budget));
+      budget -= message.length;
+    }
+    return {
+      name: clip(c.name, 300),
+      status: c.status,
+      ...(c.duration_ms !== null ? { duration_ms: c.duration_ms } : {}),
+      ...(message ? { message } : {}),
+    };
+  });
 }
 
 export interface ParseOptions {
@@ -125,6 +161,7 @@ export function parseReport(opts: ParseOptions): ParsedReport {
         tests: { total: j.total, passed: j.passed, failed: j.failed, skipped: j.skipped },
         ...(j.duration_ms !== null ? { duration_ms: j.duration_ms } : {}),
         ...(toFailures(j.failures) ? { failures: toFailures(j.failures) } : {}),
+        ...(toCases(j.cases) ? { cases: toCases(j.cases) } : {}),
       },
     };
   }

@@ -55,4 +55,27 @@ describe("parseJunit", () => {
     expect(() => parseJunit("<html><body>not junit</body></html>")).toThrow(/No <testcase>/);
     expect(() => parseJunit("")).toThrow(/No <testcase>/);
   });
+
+  describe("cases", () => {
+    it("lists every test in file order with outcome, time and failure text", () => {
+      const xml = `<testsuite name="s">
+<testcase classname="c" name="ok" time="0.25"/>
+<testcase classname="c" name="bad" time="1"><failure message="expected 1"><![CDATA[Error: expected 1
+  at t.ts:3 <b>]]></failure></testcase>
+<testcase classname="c" name="skip"><skipped/></testcase>
+<testcase classname="c" name="boom"><error message="KeyError">plain &amp; text</error></testcase>
+</testsuite>`;
+      expect(parseJunit(xml).cases).toEqual([
+        { name: "c > ok", status: "passed", duration_ms: 250, message: null },
+        { name: "c > bad", status: "failed", duration_ms: 1000, message: "expected 1\nError: expected 1\n  at t.ts:3 <b>" },
+        { name: "c > skip", status: "skipped", duration_ms: null, message: null },
+        { name: "c > boom", status: "failed", duration_ms: null, message: "KeyError\nplain & text" },
+      ]);
+    });
+
+    it("does not repeat the attribute when the element text is the same, and ignores empty elements", () => {
+      const xml = `<testsuite><testcase name="a"><failure message="same">same</failure></testcase><testcase name="b"><failure message="m"></failure></testcase></testsuite>`;
+      expect(parseJunit(xml).cases.map((c) => c.message)).toEqual(["same", "m"]);
+    });
+  });
 });
