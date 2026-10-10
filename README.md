@@ -88,7 +88,7 @@ nb --version
 nb --help
 
 # or run without installing (pin a version for reproducible scripts)
-npx @nasebanal/cli@0.1.0 account me get
+npx @nasebanal/cli@0.2.0 account me get
 ```
 
 The published package bundles the OpenAPI specs, so no `nb-api-specs` checkout is

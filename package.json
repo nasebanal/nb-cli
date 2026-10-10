@@ -1,6 +1,6 @@
 {
   "name": "@nasebanal/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "gcloud-style command-line interface for NASEBANAL APIs, generated from nb-api-specs OpenAPI contracts.",
   "license": "MIT",
   "type": "module",
