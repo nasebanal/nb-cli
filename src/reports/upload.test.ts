@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
-import { ALLOWED_TOOLS, MAX_CASES, buildReportUploadCommand, checkSuite, parseReport, toCases } from "./upload.js";
+import { MAX_CASES, buildReportUploadCommand, checkApiVersion, checkSuite, parseMetrics, parseReport, toCases } from "./upload.js";
 
 const JUNIT = `<testsuites><testsuite name="s"><testcase classname="c" name="a" time="1.5"/><testcase classname="c" name="b"><failure message="nope"/></testcase></testsuite></testsuites>`;
 const LOCUST_STATS =
@@ -220,6 +220,64 @@ describe("nb assurance report upload", () => {
     expect(JSON.parse(stdout.join("")).payload.run.key).toBe("k");
   });
 
+  it("--coverage-report adds the Specmatic API coverage as the coverage_pct metric, and only for specmatic", async () => {
+    stubApi(null);
+    const cov = join(dir, "report.json");
+    writeFileSync(cov, JSON.stringify({ results: { summary: { extra: { executionDetails: [{ coverageMetrics: { coveredOperations: 19, totalOperationsWithFilters: 21 } }] } } } }));
+    const base = ["--project", "demo", "--run-key", "k", "--dry-run"];
+    await run([...base, "--file", junitFile(), "--kind", "contract", "--tool", "specmatic", "--coverage-report", cov]);
+    expect(JSON.parse(stdout.join("")).payload.suite.metrics).toEqual({ coverage_pct: 90.5 });
+    expect(stderr.join("")).toContain("API coverage 90.5% (19/21 operations)");
+    await expect(run([...base, "--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--coverage-report", cov])).rejects.toThrow(/only for --kind contract --tool specmatic/);
+    await expect(run([...base, "--file", junitFile(), "--kind", "contract", "--tool", "specmatic", "--coverage-report", join(dir, "nope.json")])).rejects.toThrow(/File not found/);
+  });
+
+  it("--api-version labels the result and leaves the suite name alone: the version is part of the identity, not of the name", async () => {
+    stubApi(null);
+    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "contract", "--tool", "specmatic"];
+    await run([...base, "--file", junitFile(), "--api-version", "v2", "--suite", "backend-provider"]);
+    expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ api_version: "v2", name: "backend-provider" });
+    stdout.length = 0;
+    await run([...base, "--file", junitFile(), "--api-version", "v2"]);
+    const noName = JSON.parse(stdout.join("")).payload.suite;
+    expect(noName.api_version).toBe("v2");
+    expect(noName.name).toBeUndefined();
+    stdout.length = 0;
+    // no version: nothing is added, the result holds for every version
+    await run([...base, "--file", junitFile()]);
+    expect(JSON.parse(stdout.join("")).payload.suite.api_version).toBeUndefined();
+  });
+
+  it("--metric adds numbers to the suite, on top of what the report gave, and several can be repeated", async () => {
+    stubApi(null);
+    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "security", "--tool", "zap", "--file", junitFile()];
+    await run([...base, "--metric", "high=0", "--metric", "medium=3", "--metric", "low=2"]);
+    expect(JSON.parse(stdout.join("")).payload.suite.metrics).toEqual({ high: 0, medium: 3, low: 2 });
+    expect(stderr.join("")).toContain("metrics high=0 medium=3 low=2");
+    stdout.length = 0;
+    await run([...base]);
+    expect(JSON.parse(stdout.join("")).payload.suite.metrics).toBeUndefined();
+  });
+
+  it("refuses a malformed --metric before anything is sent", async () => {
+    stubApi(null);
+    const base = ["--project", "demo", "--run-key", "k", "--kind", "security", "--tool", "zap", "--file", junitFile()];
+    for (const bad of ["high", "high=", "High=1", "high=abc", "1high=2", "=3"]) {
+      await expect(run([...base, "--metric", bad])).rejects.toThrow(/--metric/);
+    }
+    expect(calls).toHaveLength(0);
+    expect(parseMetrics(["a_b=1.5", "c=-2"])).toEqual({ a_b: 1.5, c: -2 });
+    expect(() => parseMetrics(Array.from({ length: 21 }, (_, i) => `k${i}=1`))).toThrow(/At most 20/);
+  });
+
+  it("refuses a version that is not a label before anything is sent", async () => {
+    stubApi(null);
+    await expect(run(["--project", "demo", "--run-key", "k", "--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--api-version", "v 1"])).rejects.toThrow(/not a version label/);
+    expect(calls).toHaveLength(0);
+    expect(checkApiVersion(" v1 ")).toBe("v1");
+    expect(() => checkApiVersion("x".repeat(33))).toThrow();
+  });
+
   it("explains missing or invalid inputs", async () => {
     stubApi(null);
     const base = ["--project", "demo", "--run-key", "k"];
@@ -237,20 +295,15 @@ describe("nb assurance report upload", () => {
 });
 
 describe("checkSuite", () => {
-  it("accepts every supported kind / tool pair in its own format, case-insensitively", () => {
-    for (const [kind, tools] of Object.entries(ALLOWED_TOOLS)) {
-      for (const tool of tools) {
-        const format = tool === "locust" ? "locust" : "junit";
-        expect(checkSuite(kind as keyof typeof ALLOWED_TOOLS, tool, format)).toBe(tool);
-      }
+  it("takes the tool as a lower-cased label, the known ones and any other", () => {
+    for (const [kind, tool, format] of [["unit", "vitest", "junit"], ["unit", "pytest", "junit"], ["e2e", "playwright", "junit"], ["contract", "specmatic", "junit"], ["security", "zap", "junit"], ["load", "locust", "locust"], ["security", "trivy", "junit"], ["load", "k6", "junit"], ["e2e", "cypress", "junit"]] as const) {
+      expect(checkSuite(kind, tool, format)).toBe(tool);
     }
     expect(checkSuite("unit", " Vitest ", "junit")).toBe("vitest");
   });
 
-  it("rejects an unknown tool or one that belongs to another kind", () => {
-    expect(() => checkSuite("unit", "jest", "junit")).toThrow(/not supported for kind 'unit'. Supported: vitest, pytest/);
-    expect(() => checkSuite("security", "vitest", "junit")).toThrow(/Supported: zap/);
-    expect(() => checkSuite("e2e", "vitest", "junit")).toThrow(/Supported: playwright/);
+  it("rejects what is not a label", () => {
+    for (const bad of ["", "two words", "-lead", "x".repeat(51), "a/b"]) expect(() => checkSuite("unit", bad, "junit"), bad).toThrow(/not a label/);
   });
 
   it("rejects a tool paired with the wrong report format", () => {
@@ -259,9 +312,17 @@ describe("checkSuite", () => {
   });
 });
 
-describe("upload tool filter", () => {
-  it("fails before reading or sending anything when the tool is unsupported", async () => {
-    await expect(run(["--file", junitFile(), "--kind", "unit", "--tool", "jest", "--project", "demo", "--run-key", "k"])).rejects.toThrow(/not supported for kind 'unit'/);
+describe("upload tool label", () => {
+  it("fails before reading or sending anything when the tool is not a label", async () => {
+    await expect(run(["--file", junitFile(), "--kind", "unit", "--tool", "not a label", "--project", "demo", "--run-key", "k"])).rejects.toThrow(/not a label/);
     expect(calls).toHaveLength(0);
+  });
+
+  it("sends a tool the platform has never heard of, with its cases", async () => {
+    stubApi(null);
+    await run(["--file", junitFile(), "--kind", "security", "--tool", "trivy", "--project", "demo", "--run-key", "k", "--dry-run"]);
+    const suite = JSON.parse(stdout.join("")).payload.suite;
+    expect(suite).toMatchObject({ kind: "security", tool: "trivy" });
+    expect(suite.cases).toHaveLength(2);
   });
 });

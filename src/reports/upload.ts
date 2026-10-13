@@ -21,42 +21,68 @@ import { printJson } from "../output.js";
 import { detectCi, type CiInfo } from "./ci.js";
 import { parseJunit, type JunitCase, type SuiteFailure } from "./junit.js";
 import { summariseLocust } from "./locust.js";
+import { parseSpecmaticCoverage } from "./specmatic.js";
 
 export const SUITE_KINDS = ["unit", "e2e", "load", "contract", "security"] as const;
 export type SuiteKind = (typeof SUITE_KINDS)[number];
 export type ReportFormat = "junit" | "locust";
 
 /**
- * The tools Assurance accepts, per kind of suite. The CLI filters here, on the CI
- * runner, so only reports that match are ever sent; the API enforces the same list
- * (nb-assurance-api `ALLOWED_TOOLS`) because the CLI is not the only possible client.
- * Keep the two in step with the `tool` enum in nb-api-specs' assurance package.
+ * The tool is a label (nb-assurance-api `TOOL_PATTERN`): what a result means is carried by its kind and its
+ * numbers, so any scanner or runner can be reported without a change here, as long as its report is
+ * JUnit XML (or the numbers are given with --metric). Only the formats this CLI can read matter.
  */
-export const ALLOWED_TOOLS: Record<SuiteKind, readonly string[]> = {
-  unit: ["vitest", "pytest"],
-  e2e: ["playwright"],
-  contract: ["specmatic"],
-  security: ["zap"],
-  load: ["locust"],
-};
+const TOOL_PATTERN = /^[a-z0-9][a-z0-9._-]{0,49}$/;
 
-/** Tools whose report is not JUnit XML. Every other allowed tool writes JUnit. */
+/** Tools whose report is not JUnit XML; every other tool is read as JUnit. */
 const NON_JUNIT_TOOLS: Record<string, ReportFormat> = { locust: "locust" };
 
 /**
  * Check a kind / tool / format combination before anything is parsed or sent.
- * Returns the normalised (lower-case) tool name; throws a message naming what is supported.
+ * Returns the normalised (lower-case) tool label; throws a message naming what is wrong.
  */
 export function checkSuite(kind: SuiteKind, tool: string, format: ReportFormat): string {
   const name = tool.trim().toLowerCase();
-  if (!ALLOWED_TOOLS[kind].includes(name)) {
-    throw new Error(`Tool '${tool}' is not supported for kind '${kind}'. Supported: ${ALLOWED_TOOLS[kind].join(", ")}`);
+  if (!TOOL_PATTERN.test(name)) {
+    throw new Error(`Tool '${tool}' is not a label: use lower-case letters, digits, '.', '_' and '-' (up to 50), e.g. vitest or trivy`);
   }
   const expected = NON_JUNIT_TOOLS[name] ?? "junit";
   if (format !== expected) {
     throw new Error(`Tool '${name}' reports in ${expected} format, but --format is ${format}`);
   }
+  if (kind === "load" && name !== "locust" && format !== "junit") throw new Error("Only locust reports are read as CSV");
   return name;
+}
+
+/** The same label rule as the API (`utils/apiVersion.ts` in nb-assurance-api): checked here so a typo fails before anything is sent. */
+const API_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
+
+const METRIC_KEY = /^[a-z][a-z0-9_]{0,39}$/;
+const MAX_METRICS = 20;
+
+/** `--metric high=0 --metric medium=3`: extra numbers for the suite (the API keeps at most 20). */
+export function parseMetrics(pairs: string[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const pair of pairs) {
+    const eq = pair.indexOf("=");
+    const key = eq < 0 ? pair : pair.slice(0, eq).trim();
+    const raw = eq < 0 ? "" : pair.slice(eq + 1).trim();
+    const value = Number(raw);
+    if (!METRIC_KEY.test(key) || raw === "" || !Number.isFinite(value)) {
+      throw new Error(`--metric '${pair}' must be <key>=<number> with a snake_case key (e.g. high=0)`);
+    }
+    out[key] = value;
+  }
+  if (Object.keys(out).length > MAX_METRICS) throw new Error(`At most ${MAX_METRICS} --metric values per suite`);
+  return out;
+}
+
+export function checkApiVersion(label: string): string {
+  const v = label.trim();
+  if (!API_VERSION_PATTERN.test(v)) {
+    throw new Error(`--api-version '${label}' is not a version label: use letters, digits, '.', '_' and '-' (up to 32), e.g. v1 or 2026-10`);
+  }
+  return v;
 }
 
 const MAX_FAILURES = 20;
@@ -74,6 +100,8 @@ export interface SuitePayload {
   tests?: { total: number; passed: number; failed: number; skipped?: number };
   duration_ms?: number;
   metrics?: Record<string, number>;
+  /** The API version this result is for (v1, v2); absent = every version. */
+  api_version?: string;
   failures?: { name: string; message?: string }[];
   cases?: { name: string; status: "passed" | "failed" | "skipped"; duration_ms?: number; message?: string }[];
 }
@@ -272,6 +300,9 @@ function statsFileIn(dir: string): string {
 
 interface UploadOptions {
   file?: string;
+  coverageReport?: string;
+  metric?: string[];
+  apiVersion?: string;
   dir?: string;
   format?: string;
   kind?: string;
@@ -306,10 +337,13 @@ export function buildReportUploadCommand(): Command {
     .description("Report a test result file (JUnit XML or Locust CSV) to an Assurance project")
     .option("--file <path>", "the report file (JUnit XML, or Locust *_stats.csv)")
     .option("--dir <dir>", "a Locust output directory (uses its *_stats.csv)")
+    .option("--coverage-report <path>", "specmatic: its report (the HTML or a JSON copy); adds the API coverage as the coverage_pct metric")
     .option("--format <format>", "junit | locust (default: from the file name)")
     .option("--kind <kind>", `what the suite proves: ${SUITE_KINDS.join(" | ")} (locust: load)`)
-    .option("--tool <name>", "the producing tool, e.g. vitest, pytest, playwright, specmatic (locust: locust)")
+    .option("--tool <label>", "the producing tool, a free label, e.g. vitest, pytest, playwright, specmatic, zap, trivy (locust: locust)")
     .option("--suite <name>", "tells apart several suites of one kind in a run (e.g. api, web)")
+    .option("--metric <key=value>", "an extra number for the suite, repeatable (e.g. --metric high=0 --metric medium=3; for security: critical, high, medium, low, info)", (v: string, all: string[] = []) => [...all, v])
+    .option("--api-version <label>", "the API version the result is for (e.g. v1, v2), part of the suite's identity next to its kind and name; leave it out for results that hold for every version, such as unit tests")
     .option("--project <name>", "project name (CI: the repository); found, or created if missing")
     .option("--repo <repo>", "repository recorded on a newly created project (CI: detected)")
     .option("--run-key <key>", "identity of the pipeline run (CI: detected); all jobs of a run share it")
@@ -338,6 +372,7 @@ export function buildReportUploadCommand(): Command {
       const maxFailRatio = Number(ratioRaw);
       if (!Number.isFinite(maxFailRatio) || maxFailRatio < 0 || maxFailRatio > 1) fail("--max-fail-ratio must be a number between 0 and 1");
 
+      const apiVersion = opts.apiVersion === undefined ? undefined : checkApiVersion(opts.apiVersion);
       const parsed = parseReport({
         format,
         kind,
@@ -347,6 +382,23 @@ export function buildReportUploadCommand(): Command {
         maxFailRatio,
         file,
       });
+
+      if (opts.coverageReport !== undefined) {
+        if (kind !== "contract" || checkedTool !== "specmatic") fail("--coverage-report is only for --kind contract --tool specmatic");
+        if (!existsSync(opts.coverageReport)) fail(`File not found: ${opts.coverageReport}`);
+        const cov = parseSpecmaticCoverage(readFileSync(opts.coverageReport, "utf8"));
+        parsed.suite.metrics = { ...parsed.suite.metrics, coverage_pct: cov.coverage_pct };
+        parsed.note += `, API coverage ${cov.coverage_pct}% (${cov.covered}/${cov.total} operations)`;
+      }
+
+      if (apiVersion !== undefined) parsed.suite.api_version = apiVersion;
+      if (opts.metric !== undefined && opts.metric.length > 0) {
+        const extra = parseMetrics(opts.metric);
+        const merged = { ...parsed.suite.metrics, ...extra };
+        if (Object.keys(merged).length > MAX_METRICS) fail(`At most ${MAX_METRICS} metrics per suite`);
+        parsed.suite.metrics = merged;
+        parsed.note += `, metrics ${Object.entries(extra).map(([k, v]) => `${k}=${v}`).join(" ")}`;
+      }
 
       const ci: CiInfo = detectCi(process.env);
       const runKey = opts.runKey ?? ci.runKey ?? fail("Cannot determine the run key; pass --run-key");
