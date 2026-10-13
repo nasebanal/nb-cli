@@ -32,16 +32,13 @@ small summary (counts, coverage-free metrics, the first failures, and for JUnit
 the per-test cases) and reports it to a NASEBANAL Assurance project. The same line works in a pipeline and on a
 laptop; in CI it needs only a token:
 
-Only these tool / kind pairs are accepted; anything else is refused before
-anything is read or sent (the API enforces the same list):
-
-| `--kind` | `--tool` | Report format |
-|---|---|---|
-| `unit` | `vitest`, `pytest` | JUnit XML |
-| `e2e` | `playwright` | JUnit XML |
-| `contract` | `specmatic` | JUnit XML |
-| `security` | `zap` | JUnit XML |
-| `load` | `locust` | Locust CSV |
+The **kind** is one of a fixed set of perspectives (`unit`, `e2e`, `contract`,
+`security`, `load`); the **tool** is a free label (`vitest`, `pytest`, `playwright`,
+`specmatic`, `zap`, `locust`, or `trivy`, `k6`, `cypress`...). What a result
+means is carried by its kind and its numbers, so a scanner or runner can be swapped
+without a change in Assurance. The CLI reads **JUnit XML** (any tool) and
+**Locust CSV**; for a tool that writes something else, convert it to JUnit or give the
+numbers with `--metric` (for a scanner: `critical`, `high`, `medium`, `low`, `info`).
 
 ```bash
 export NB_TOKEN=nbpat_…        # a PAT or service-account token (no browser needed)
@@ -49,6 +46,17 @@ export NB_TOKEN=nbpat_…        # a PAT or service-account token (no browser ne
 # JUnit XML: vitest (--reporter=junit), pytest (--junitxml), Specmatic, Playwright (--reporter=junit)
 nb assurance report upload --file report/junit.xml --kind unit --tool pytest
 nb assurance report upload --file results/junit.xml --kind e2e --tool playwright --suite web
+
+# Specmatic: the JUnit XML, plus its HTML report for the API coverage (coverage_pct = operations exercised / operations in the spec)
+nb assurance report upload --file specmatic/junit/TEST-junit-jupiter.xml --kind contract --tool specmatic \
+  --coverage-report specmatic/report/test/html/index.html
+
+# One repository, several API versions: label the result (the version is part of the suite's identity, so v1 and v2 of the same name sit side by side)
+nb assurance report upload --file specmatic/v2/junit.xml --kind contract --tool specmatic --api-version v2
+# unit tests hold for every version: leave --api-version out
+
+# Extra numbers for the suite (repeatable), e.g. ZAP's findings by severity - what the Assurance security gate reads
+nb assurance report upload --file zap/report/baseline-junit.xml --kind security --tool zap --metric high=0 --metric medium=3 --metric low=2
 
 # Locust (--csv <prefix>): the *_stats.csv, with its *_failures / *_exceptions / *_stats_history siblings
 nb assurance report upload --dir locust/logs/20261001_090000
