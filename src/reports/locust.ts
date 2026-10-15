@@ -28,6 +28,22 @@ export interface LocustSummary {
   reasons: string[];
 }
 
+/**
+ * The CSV's column names changed between Locust versions: 1.x wrote "# requests" / "# failures" / "Median response
+ * time" (and named the aggregate row "Total"), 2.x writes "Request Count" / "Failure Count" / "Median Response Time"
+ * ("Aggregated"). Each value is read under every name it has had, the first present one winning.
+ */
+const COLUMNS = {
+  requests: ["Request Count", "# requests"],
+  failures: ["Failure Count", "# failures"],
+  median: ["Median Response Time", "Median response time"],
+  average: ["Average Response Time", "Average response time"],
+  max: ["Max Response Time", "Max response time"],
+} as const;
+
+const has = (row: Record<string, string>, names: readonly string[]) => names.some((n) => n in row);
+const read = (row: Record<string, string>, names: readonly string[]) => num(row[names.find((n) => n in row) ?? ""]);
+
 function num(value: string | undefined): number | null {
   if (value === undefined || value === "" || value === "N/A") return null;
   const n = Number(value);
@@ -38,21 +54,28 @@ const round = (n: number, digits = 2) => Math.round(n * 10 ** digits) / 10 ** di
 
 export function summariseLocust(files: LocustFiles, maxFailRatio: number): LocustSummary {
   const stats = toRecords(files.stats);
-  const total = stats.find((r) => r.Name === "Aggregated");
-  if (!total) throw new Error('No "Aggregated" row in the stats CSV - is this a Locust *_stats.csv file?');
+  // The row of all requests together: "Aggregated" (2.x) or "Total" (1.x).
+  const total = stats.find((r) => r.Name === "Aggregated" || r.Name === "Total");
+  if (!total) throw new Error('No "Aggregated" (or "Total") row in the stats CSV - is this a Locust *_stats.csv file?');
+  // Without the counts the numbers below would silently be 0, a green result for a report nobody understood: refuse it.
+  if (!has(total, COLUMNS.requests) || !has(total, COLUMNS.failures)) {
+    throw new Error(
+      `The stats CSV has no request / failure count column (looked for ${[...COLUMNS.requests, ...COLUMNS.failures].map((n) => `"${n}"`).join(", ")}; found: ${Object.keys(total).join(", ")}) - is it from a Locust version this nb does not know?`,
+    );
+  }
 
-  const requests = num(total["Request Count"]) ?? 0;
-  const failed = num(total["Failure Count"]) ?? 0;
+  const requests = read(total, COLUMNS.requests) ?? 0;
+  const failed = read(total, COLUMNS.failures) ?? 0;
 
   const metrics: Record<string, number> = { requests, failures: failed };
   const put = (key: string, value: number | null) => {
     if (value !== null) metrics[key] = round(value);
   };
-  put("avg_ms", num(total["Average Response Time"]));
-  put("p50_ms", num(total["50%"]) ?? num(total["Median Response Time"]));
+  put("avg_ms", read(total, COLUMNS.average));
+  put("p50_ms", num(total["50%"]) ?? read(total, COLUMNS.median));
   put("p95_ms", num(total["95%"]));
   put("p99_ms", num(total["99%"]));
-  put("max_ms", num(total["Max Response Time"]));
+  put("max_ms", read(total, COLUMNS.max));
   put("rps", num(total["Requests/s"]));
   const ratio = requests > 0 ? failed / requests : 0;
   metrics.error_rate_pct = round(ratio * 100);

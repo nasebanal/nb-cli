@@ -95,7 +95,12 @@ const MAX_CASE_MESSAGE_BUDGET = 1_000_000;
 export interface SuitePayload {
   kind: SuiteKind;
   tool: string;
-  name?: string;
+  /** The components the result is for (names; new ones are created in the project); absent = the component `default`. */
+  components?: string[];
+  /** Tells apart results that are otherwise the same (two scans of one tool); absent = none. */
+  label?: string;
+  /** The version of the tool that produced the report; informational. */
+  tool_version?: string;
   status: "passed" | "failed";
   tests?: { total: number; passed: number; failed: number; skipped?: number };
   duration_ms?: number;
@@ -161,7 +166,12 @@ export interface ParseOptions {
   format: ReportFormat;
   kind: SuiteKind;
   tool: string;
-  suiteName?: string;
+  /** The components the result is for; none = the API's `default`. */
+  components?: string[];
+  /** Tells apart results that are otherwise the same. */
+  label?: string;
+  /** The version of the tool that produced the report. */
+  toolVersion?: string;
   /** Forced pass/fail; otherwise derived from the report. */
   status?: "passed" | "failed";
   maxFailRatio: number;
@@ -176,7 +186,13 @@ function locustSibling(statsFile: string, suffix: string): string | undefined {
 
 export function parseReport(opts: ParseOptions): ParsedReport {
   const text = readFileSync(opts.file, "utf8");
-  const base = { kind: opts.kind, tool: opts.tool, ...(opts.suiteName ? { name: opts.suiteName } : {}) };
+  const base = {
+    kind: opts.kind,
+    tool: opts.tool,
+    ...(opts.components && opts.components.length > 0 ? { components: opts.components } : {}),
+    ...(opts.label ? { label: opts.label } : {}),
+    ...(opts.toolVersion ? { tool_version: opts.toolVersion } : {}),
+  };
 
   if (opts.format === "junit") {
     const j = parseJunit(text);
@@ -307,7 +323,9 @@ interface UploadOptions {
   format?: string;
   kind?: string;
   tool?: string;
-  suite?: string;
+  component?: string[];
+  label?: string;
+  toolVersion?: string;
   project?: string;
   repo?: string;
   runKey?: string;
@@ -320,6 +338,42 @@ interface UploadOptions {
   dryRun?: boolean;
   env?: string;
   token?: string;
+}
+
+/** At most this many components per result (the API's limit) and this many characters in a name. */
+const MAX_COMPONENTS = 20;
+const MAX_COMPONENT_LENGTH = 100;
+
+/** The `--label`: trimmed, not empty, within the API's limit. */
+function checkLabel(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const label = raw.trim();
+  if (label === "") fail("--label must not be empty");
+  if (label.length > MAX_COMPONENT_LENGTH) fail(`--label must be ${MAX_COMPONENT_LENGTH} characters or fewer`);
+  return label;
+}
+
+/** The `--tool-version`: trimmed, not empty, within the API's limit. */
+function checkToolVersion(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const version = raw.trim();
+  if (version === "") fail("--tool-version must not be empty");
+  if (version.length > 50) fail("--tool-version must be 50 characters or fewer");
+  return version;
+}
+
+/** The `--component` names: trimmed, no empty one, no two alike ignoring case, within the API's limits. */
+function checkComponents(raw: string[] | undefined): string[] | undefined {
+  if (raw === undefined) return undefined;
+  const out: string[] = [];
+  for (const value of raw) {
+    const name = value.trim();
+    if (name === "") fail("--component must not be empty");
+    if (name.length > MAX_COMPONENT_LENGTH) fail(`--component must be ${MAX_COMPONENT_LENGTH} characters or fewer: ${name.slice(0, 20)}…`);
+    if (!out.some((o) => o.toLowerCase() === name.toLowerCase())) out.push(name);
+  }
+  if (out.length > MAX_COMPONENTS) fail(`At most ${MAX_COMPONENTS} --component values`);
+  return out;
 }
 
 function resolveFormat(opts: UploadOptions, file: string): ReportFormat {
@@ -341,9 +395,11 @@ export function buildReportUploadCommand(): Command {
     .option("--format <format>", "junit | locust (default: from the file name)")
     .option("--kind <kind>", `what the suite proves: ${SUITE_KINDS.join(" | ")} (locust: load)`)
     .option("--tool <label>", "the producing tool, a free label, e.g. vitest, pytest, playwright, specmatic, zap, trivy (locust: locust)")
-    .option("--suite <name>", "tells apart several suites of one kind in a run (e.g. api, web)")
+    .option("--component <name>", "a component the result is for (e.g. frontend, backend), repeatable when it covers several (e.g. an end-to-end test: --component frontend --component backend); new names are created in the project; leave it out for the component `default`", (v: string, all: string[] = []) => [...all, v])
+    .option("--label <name>", "tells apart results that are otherwise the same, such as two scans of one tool on the same components (e.g. --label baseline, --label full-scan); part of the result's identity, so the same label again replaces the result; optional")
+    .option("--tool-version <version>", "the version of the tool that produced the report (e.g. 9.1.0): informational, shown next to the tool, handy when a tool's new version changes its layout; optional")
     .option("--metric <key=value>", "an extra number for the suite, repeatable (e.g. --metric high=0 --metric medium=3; for security: critical, high, medium, low, info)", (v: string, all: string[] = []) => [...all, v])
-    .option("--api-version <label>", "the API version the result is for (e.g. v1, v2), part of the suite's identity next to its kind and name; leave it out for results that hold for every version, such as unit tests")
+    .option("--api-version <label>", "the API version the result is for (e.g. v1, v2), part of the result's identity next to its kind and components; leave it out for results that hold for every version, such as unit tests")
     .option("--project <name>", "project name (CI: the repository); found, or created if missing")
     .option("--repo <repo>", "repository recorded on a newly created project (CI: detected)")
     .option("--run-key <key>", "identity of the pipeline run (CI: detected); all jobs of a run share it")
@@ -377,7 +433,9 @@ export function buildReportUploadCommand(): Command {
         format,
         kind,
         tool: checkedTool,
-        suiteName: opts.suite,
+        components: checkComponents(opts.component),
+        label: checkLabel(opts.label),
+        toolVersion: checkToolVersion(opts.toolVersion),
         status: opts.status as "passed" | "failed" | undefined,
         maxFailRatio,
         file,
