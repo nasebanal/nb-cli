@@ -45,7 +45,17 @@ export NB_TOKEN=nbpat_…        # a PAT or service-account token (no browser ne
 
 # JUnit XML: vitest (--reporter=junit), pytest (--junitxml), Specmatic, Playwright (--reporter=junit)
 nb assurance report upload --file report/junit.xml --kind unit --tool pytest
-nb assurance report upload --file results/junit.xml --kind e2e --tool playwright --suite web
+nb assurance report upload --file results/junit.xml --kind e2e --tool playwright --component web
+
+# Two scans of one tool on the same components (ZAP's baseline and full scan): a label tells them apart
+nb assurance report upload --file report/baseline-junit.xml --kind security --tool zap --component frontend --label baseline
+nb assurance report upload --file report/full-scan-junit.xml --kind security --tool zap --component frontend --label full-scan
+
+# The tool's own version is informational and optional
+nb assurance report upload --file report/junit.xml --kind unit --tool pytest --tool-version 9.1.0
+
+# A result may be about several components: repeat the flag (new names are created in the project; none = `default`)
+nb assurance report upload --file results/junit.xml --kind e2e --tool playwright --component frontend --component backend
 
 # Specmatic: the JUnit XML, plus its HTML report for the API coverage (coverage_pct = operations exercised / operations in the spec)
 nb assurance report upload --file specmatic/junit/TEST-junit-jupiter.xml --kind contract --tool specmatic \

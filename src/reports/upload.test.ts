@@ -232,20 +232,66 @@ describe("nb assurance report upload", () => {
     await expect(run([...base, "--file", junitFile(), "--kind", "contract", "--tool", "specmatic", "--coverage-report", join(dir, "nope.json")])).rejects.toThrow(/File not found/);
   });
 
-  it("--api-version labels the result and leaves the suite name alone: the version is part of the identity, not of the name", async () => {
+  it("--api-version labels the result and leaves the components alone: the version is part of the identity next to them", async () => {
     stubApi(null);
     const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "contract", "--tool", "specmatic"];
-    await run([...base, "--file", junitFile(), "--api-version", "v2", "--suite", "backend-provider"]);
-    expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ api_version: "v2", name: "backend-provider" });
+    await run([...base, "--file", junitFile(), "--api-version", "v2", "--component", "backend-provider"]);
+    expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ api_version: "v2", components: ["backend-provider"] });
     stdout.length = 0;
     await run([...base, "--file", junitFile(), "--api-version", "v2"]);
-    const noName = JSON.parse(stdout.join("")).payload.suite;
-    expect(noName.api_version).toBe("v2");
-    expect(noName.name).toBeUndefined();
+    const noComponent = JSON.parse(stdout.join("")).payload.suite;
+    expect(noComponent.api_version).toBe("v2");
+    expect(noComponent.components).toBeUndefined();
     stdout.length = 0;
     // no version: nothing is added, the result holds for every version
     await run([...base, "--file", junitFile()]);
     expect(JSON.parse(stdout.join("")).payload.suite.api_version).toBeUndefined();
+  });
+
+  it("--component is repeatable: a result may be about several components", async () => {
+    stubApi(null);
+    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "e2e", "--tool", "playwright", "--file", junitFile()];
+    await run([...base, "--component", "frontend", "--component", " backend ", "--component", "Frontend"]);
+    expect(JSON.parse(stdout.join("")).payload.suite.components).toEqual(["frontend", "backend"]); // trimmed, no duplicate ignoring case
+    stdout.length = 0;
+    await run(base);
+    expect(JSON.parse(stdout.join("")).payload.suite.components).toBeUndefined(); // the API names it `default`
+  });
+
+  it("--label tells apart two scans of one tool: sent trimmed, left out when not given, refused when empty or too long", async () => {
+    stubApi(null);
+    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "security", "--tool", "zap", "--file", junitFile(), "--component", "frontend"];
+    await run([...base, "--label", " full-scan "]);
+    expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ components: ["frontend"], label: "full-scan" });
+    stdout.length = 0;
+    await run(base);
+    expect(JSON.parse(stdout.join("")).payload.suite.label).toBeUndefined();
+    await expect(run([...base, "--label", "  "])).rejects.toThrow(/must not be empty/);
+    await expect(run([...base, "--label", "x".repeat(101)])).rejects.toThrow(/100 characters or fewer/);
+  });
+
+  it("--tool-version records the version of the tool: sent trimmed, left out when not given, refused when empty or too long", async () => {
+    stubApi(null);
+    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "unit", "--tool", "pytest", "--file", junitFile()];
+    await run([...base, "--tool-version", " 9.1.0 "]);
+    expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ tool: "pytest", tool_version: "9.1.0" });
+    stdout.length = 0;
+    await run(base);
+    expect(JSON.parse(stdout.join("")).payload.suite.tool_version).toBeUndefined();
+    await expect(run([...base, "--tool-version", " "])).rejects.toThrow(/must not be empty/);
+    await expect(run([...base, "--tool-version", "x".repeat(51)])).rejects.toThrow(/50 characters or fewer/);
+  });
+
+  it("--component refuses an empty or too long name and more than 20, and --suite is gone", async () => {
+    stubApi(null);
+    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "unit", "--tool", "vitest", "--file", junitFile()];
+    await expect(run([...base, "--component", "  "])).rejects.toThrow(/must not be empty/);
+    await expect(run([...base, "--component", "x".repeat(101)])).rejects.toThrow(/100 characters or fewer/);
+    const many = Array.from({ length: 21 }, (_, i) => ["--component", `c${i}`]).flat();
+    await expect(run([...base, ...many])).rejects.toThrow(/At most 20/);
+    const flags = buildReportUploadCommand().options.map((o) => o.long);
+    expect(flags).toContain("--component");
+    expect(flags).not.toContain("--suite");
   });
 
   it("--metric adds numbers to the suite, on top of what the report gave, and several can be repeated", async () => {
