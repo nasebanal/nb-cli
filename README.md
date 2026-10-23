@@ -204,7 +204,10 @@ Notes:
 
 ### From source (contributors)
 
-Requires a sibling `nb-api-specs` checkout (the build syncs specs from it):
+No registry token and no sibling checkout needed: the build fetches the pinned,
+public API contracts from `api-specs.nasebanal.com` (see
+[Local Development](#local-development)). Contributing: see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```bash
 git clone https://github.com/nasebanal/nb-cli.git
@@ -359,7 +362,9 @@ npm run typecheck       # tsc --noEmit
 `sync-specs` resolves each spec from, in order:
 
 1. `node_modules/@nasebanal/api-specs-<api>/spec.yaml` (installed package), then
-2. `../nb-api-specs/packages/<api>/spec.yaml` (local monorepo checkout).
+2. `../nb-api-specs/packages/<api>/spec.yaml` (local monorepo checkout), then
+3. the version pinned in `spec-versions.json`, fetched from the public specs host
+   (the only source under CI, and what an outside contributor gets).
 
 In production the published `@nasebanal/api-specs-*` packages are pinned as
 dependencies — the consumer side of CDD. In local dev we copy straight from the
