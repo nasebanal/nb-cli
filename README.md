@@ -10,7 +10,7 @@ Contract-Driven Development (CDD) pipeline, alongside the web frontends.
 
 ```console
 $ nb account me get
-$ nb recorder records list
+$ nb record records list
 $ nb target shares accept <id>
 $ nb account me tokens create --data '{"name":"ci"}'
 ```
