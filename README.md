@@ -117,6 +117,20 @@ needed for a registry install.
 > `api-specs-*` packages), it captures this package too. Install with
 > `npm install -g @nasebanal/cli --@nasebanal:registry=https://registry.npmjs.org/`.
 
+### Upgrading
+
+```bash
+nb upgrade           # install the latest published version
+nb upgrade --check   # only report whether a newer version exists
+```
+
+When a newer version is out, interactive runs print a one-line notice on stderr
+(`Update available: 0.5.0 -> 0.6.0`). The registry is checked at most once a day
+and the result is cached in `~/.config/nasebanal/update-check.json`. Nothing is
+printed when stderr is not a terminal or `CI` is set; `NB_NO_UPDATE_NOTIFIER=1`
+turns the notice off. A dev link to a source checkout is never overwritten:
+`nb upgrade` tells you to `git pull && npm run build` instead.
+
 ### Versioning and releases
 
 Versions follow SemVer (0.x until 1.0: breaking changes bump the minor). Each

@@ -24,7 +24,7 @@ export interface Config {
   env?: Environment;
 }
 
-function configDir(): string {
+export function configDir(): string {
   const base = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
   return join(base, "nasebanal");
 }
