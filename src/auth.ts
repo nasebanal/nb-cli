@@ -11,6 +11,7 @@ import { Command } from "commander";
 import { createInterface } from "node:readline";
 import { loadConfig, saveConfig, resolveToken, resolveEnv, configFilePath, type Config } from "./config.js";
 import { login } from "./oauth.js";
+import { envTokenHint } from "./output.js";
 
 function readSecretLine(promptText: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: false });
@@ -66,6 +67,9 @@ export function buildAuthCommand(): Command {
       const expiry = tokens.expires_at ? new Date(tokens.expires_at).toLocaleString() : "n/a";
       process.stdout.write(`\n✓ Logged in. Credentials saved to ${configFilePath()}\n`);
       process.stdout.write(`  Access token expires: ${expiry}${tokens.refresh_token ? " (auto-refreshes)" : ""}\n`);
+      // The login is saved, but a token exported in this shell still wins: say so now, not after a confusing 401 later.
+      const shadowed = envTokenHint();
+      if (shadowed) process.stderr.write(`\n! ${shadowed.replace("takes priority over `nb auth login`.", "takes priority over this login.")}\n`);
     });
 
   auth

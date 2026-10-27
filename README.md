@@ -64,6 +64,10 @@ nb assurance report upload --file specmatic/junit/TEST-junit-jupiter.xml --kind 
 # One repository, several API versions: label the result (the version is part of the suite's identity, so v1 and v2 of the same name sit side by side)
 nb assurance report upload --file specmatic/v2/junit.xml --kind contract --tool specmatic --api-version v2
 # unit tests hold for every version: leave --api-version out
+# set NB_API_VERSION once (a CI variable per job or branch) instead of repeating the flag; the flag wins, an empty variable means none
+NB_API_VERSION=v2 nb assurance report upload --file specmatic/v2/junit.xml --kind contract --tool specmatic
+# a project may require a version for some kinds of result (Assurance > Projects > the project's settings): a result of such a kind
+# without one is refused with 422 API_VERSION_REQUIRED (the message says to pass --api-version or set NB_API_VERSION)
 
 # Extra numbers for the suite (repeatable), e.g. ZAP's findings by severity - what the Assurance security gate reads
 nb assurance report upload --file zap/report/baseline-junit.xml --kind security --tool zap --metric high=0 --metric medium=3 --metric low=2
@@ -74,12 +78,54 @@ nb assurance report upload --dir locust/logs/20261001_090000
 
 - **Project:** found by name, created when missing (`--no-create-project` to fail
   instead). In CI the name defaults to the repository (`GITHUB_REPOSITORY` /
-  `CI_PROJECT_PATH`); elsewhere pass `--project`.
+  `CI_PROJECT_PATH`); elsewhere pass `--project`. That is the zero-configuration
+  start; once the project exists, **pin it by id** (`--project-id <id>` or
+  `NB_ASSURANCE_PROJECT_ID`): the upload then goes straight to that project, nothing
+  is looked up by name or created, so renaming the project, a typo, or a renamed
+  repository can no longer send results elsewhere. An unknown id is an error, never a
+  new project. The id is printed after every upload (and, in GitHub Actions, written
+  to `$GITHUB_OUTPUT` as `project_id`). Keep one id per environment (`--env`), and
+  take care when copying a workflow to another repository: its id goes with it.
+- **Link to the report in the repository:** the CLI also sends the CI `--provider`
+  (`github` | `gitlab` | `other`, detected) and, when the report file is **committed**
+  (tracked, unchanged since `HEAD`, and `HEAD` is the reported commit), its path
+  relative to the repository root, so Assurance can link to the file at that commit.
+  A report that CI has just generated is not in the commit, so no path is sent;
+  override with `--report-path`.
+- **Tie the project to its API in the catalog (`--spec-id`, `--spec-environment`):**
+  `--spec-id <id>` links the project to a spec of the API catalog (its id in Assurance /
+  Specs), `--spec-environment production` says which environment of it the project covers
+  (needs `--spec-id`). A new project is created already linked; an existing one is
+  changed **only when it differs**, so a pipeline that runs on every commit writes nothing
+  once the link is right. Pointing it at another spec clears the old environment unless one
+  is given too. The id is not looked up in the catalog (it is another service): a typo shows
+  as "no spec" on the project. The link is set after the result is in, so a failure there
+  leaves the result reported and says so. `--spec-file <openapi.yaml>` does the whole chain in one command (see below).
+- **Register the spec file and tie the project to it in one command (`--spec-file`):**
+  `nb assurance report upload ... --spec-file openapi.yaml [--spec-name N] [--spec-group G]
+  [--spec-org ID] [--spec-environment production]` first runs `nb specs push` on the file,
+  then creates / links the project to the spec it returns, then reports the result. The
+  catalog's answer never costs the result: if registering the spec fails (a plan without the
+  catalog, the limit of specs), the result is still reported, without the link, and the command
+  ends with the reason and a non-zero exit. Exclusive with `--spec-id`.
 - **Run:** every job of one pipeline run shares a run key (CI: `GITHUB_RUN_ID` +
   attempt, `CI_PIPELINE_ID`; locally `local-<sha>-<day>`), so a unit job and an e2e
   job land in the same run, and re-running a job replaces its own result.
   Commit, branch and CI URL are detected the same way; override with `--run-key`,
   `--commit`, `--branch`, `--ci-url`.
+- **Keep the tool's own report (`--attach <file|folder>`):** a CI runner is thrown away
+  when the job ends, and the summary above is not the tool's report (Playwright's HTML
+  report, Specmatic's report, a JUnit file with everything in it). `--attach` sends the
+  original with the result: a file as it is, a folder as a zip made by the CLI (regular
+  files only, symbolic links are never followed). Up to 20 MiB per result and 200 MiB per
+  project; the CLI checks the size before anything is sent. It is **opt-in twice** - nothing is
+  attached unless you pass it, and the server refuses it (403 `ATTACHMENTS_DISABLED`) until
+  the project has turned on "Attaching original reports" in its settings in Assurance (off by
+  default). Make sure the report holds no secrets or personal data.
+  The server only stores it (next to the result's cases, deleted with the result and by
+  the project's retention) and offers it as a **download** to the project's members in
+  Assurance; it is never opened, unzipped or shown in the browser. A failed attachment
+  leaves the result reported and the command exits non-zero with the reason.
 - **Pass / fail:** JUnit - any failed or errored test fails the suite. Locust - an
   unhandled task exception, or a failure ratio above `--max-fail-ratio` (default
   `$LOCUST_MAX_FAIL_RATIO`, else 0), fails it - the same rule as nb-quickstarts'
@@ -90,6 +136,30 @@ nb assurance report upload --dir locust/logs/20261001_090000
   fill the rest; a failure text is clipped to 2000 characters, and about 1 MB of failure text
   is sent in total (names and outcomes always stay). Locust reports have no cases.
 - `--dry-run` prints what would be sent and calls nothing.
+
+## The API catalog from a pipeline (`nb specs push`)
+
+`nb specs push --file openapi.yaml` registers an OpenAPI document in the catalog (your own
+specs, Evolution): a new spec, or a new version of the one that has the same name (or `--id`).
+It is made to run on **every commit**:
+
+- **Nothing is uploaded when the file is already the latest version.** The CLI compares the
+  document's SHA-256 with the `content_hash` the catalog keeps for the latest version before it
+  sends anything; the same bytes print `unchanged (already vN: nothing uploaded)`. (The catalog
+  refuses an identical upload itself, `409 UNCHANGED`, which is also taken as "unchanged", for two
+  jobs racing.) The comparison is of bytes: a generator that writes a timestamp into the
+  document makes a new version every run, so keep the output stable.
+- **No group has to exist.** A spec is registered in no group unless `--group <name>` is given
+  (the group is made when missing); an existing spec is never moved by a push (the catalog
+  moves it, by drag and drop or the select on its page).
+- The name is `--name`, else the document's `info.title`, else the file's name. A new version
+  carries a note made from the commit, the branch and the CI run (`--note` replaces it), so
+  "which commit made v7" has an answer.
+- `--org <id|personal>` (or `$NB_SPECS_ORG`) says whose catalog it is: the catalog is per
+  owner and needs `X-Active-Organization-Id`; `personal` (the default) is your own, an
+  organization's needs its Enterprise plan. `--dry-run` reads the catalog and says what would
+  happen. `NB_SPECS_BASE_URL` points it at another host (local: `http://localhost:8792`).
+- In GitHub Actions the spec's id is written to `$GITHUB_OUTPUT` as `spec_id`.
 
 ## Installation
 
