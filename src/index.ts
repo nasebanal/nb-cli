@@ -14,6 +14,7 @@ import { buildAuthCommand } from "./auth.js";
 import { specExists } from "./spec/loader.js";
 import { printError } from "./output.js";
 import { buildReportUploadCommand } from "./reports/upload.js";
+import { buildSpecsCommand } from "./specs/command.js";
 import { buildUpgradeCommand, startUpdateNotifier } from "./update.js";
 
 // Single source of truth for the version: package.json (dist/ and src/ both sit
@@ -32,6 +33,7 @@ program
 
 program.addCommand(buildAuthCommand());
 program.addCommand(buildUpgradeCommand(version));
+program.addCommand(buildSpecsCommand());
 
 for (const api of API_CATALOG) {
   if (!specExists(api.spec)) {

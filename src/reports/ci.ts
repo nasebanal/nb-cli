@@ -5,6 +5,7 @@
  * piles up). Every value can still be overridden on the command line.
  */
 import { execFileSync } from "node:child_process";
+import { basename, dirname, resolve } from "node:path";
 
 export interface CiInfo {
   provider: "github" | "gitlab" | "local";
@@ -32,6 +33,37 @@ export function readGit(): GitInfo {
     }
   };
   return { sha: git("rev-parse", "HEAD"), branch: git("branch", "--show-current") };
+}
+
+/** Runs git in `cwd`: the trimmed output, or null when git fails (not a repository, a diff, no git at all). */
+export type GitRunner = (args: string[], cwd: string) => string | null;
+
+const runGit: GitRunner = (args, cwd) => {
+  try {
+    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * The path of a report file inside the repository, relative to its root (`reports/junit.xml`), for a
+ * link to the file at the run's commit. Only a file that is COMMITTED qualifies: tracked, identical to
+ * HEAD, and HEAD is the commit being reported. A report that CI just generated is none of those, and a
+ * link to a file that is not in the commit would be a dead one, so the answer is then null.
+ */
+export function readReportPath(file: string, commitSha: string | null, git: GitRunner = runGit): string | null {
+  const abs = resolve(file);
+  const cwd = dirname(abs);
+  const name = basename(abs);
+  const path = git(["ls-files", "--full-name", "--", name], cwd);
+  if (!path) return null;
+  if (git(["diff", "--quiet", "HEAD", "--", name], cwd) === null) return null;
+  if (commitSha) {
+    const head = git(["rev-parse", "HEAD"], cwd);
+    if (!head || !(head === commitSha || head.startsWith(commitSha) || commitSha.startsWith(head))) return null;
+  }
+  return path.replace(/\\/g, "/");
 }
 
 const nonEmpty = (v: string | undefined) => (v && v.trim() !== "" ? v : null);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { detectCi } from "./ci.js";
+import { detectCi, readReportPath, type GitRunner } from "./ci.js";
 
 const noGit = () => ({ sha: null, branch: null });
 
@@ -46,5 +46,35 @@ describe("detectCi", () => {
       project: null,
     });
     expect(detectCi({}, noGit, now).runKey).toBe("local-20261001");
+  });
+});
+
+describe("readReportPath", () => {
+  /** A fake git: each command's answer by its first words; null = the command failed. */
+  const fakeGit = (answers: Record<string, string | null>): GitRunner => (args) => {
+    const key = args.slice(0, 2).join(" ");
+    return key in answers ? answers[key] : null;
+  };
+  const committed = { "ls-files --full-name": "reports/junit.xml", "diff --quiet": "", "rev-parse HEAD": "abc123def" };
+
+  it("gives the path relative to the repository root for a file that is committed at the reported commit", () => {
+    expect(readReportPath("/work/repo/reports/junit.xml", "abc123def", fakeGit(committed))).toBe("reports/junit.xml");
+    expect(readReportPath("/work/repo/reports/junit.xml", "abc123", fakeGit(committed))).toBe("reports/junit.xml"); // a short sha
+    expect(readReportPath("/work/repo/reports/junit.xml", null, fakeGit(committed))).toBe("reports/junit.xml");
+  });
+
+  it("gives nothing for an untracked file, outside a repository, or without git", () => {
+    expect(readReportPath("/w/x.xml", "abc", fakeGit({ ...committed, "ls-files --full-name": "" }))).toBeNull();
+    expect(readReportPath("/w/x.xml", "abc", fakeGit({}))).toBeNull();
+  });
+
+  it("gives nothing for a file changed since the commit, or for another commit than the reported one", () => {
+    expect(readReportPath("/w/x.xml", "abc123def", fakeGit({ ...committed, "diff --quiet": null }))).toBeNull();
+    expect(readReportPath("/w/x.xml", "ffffff", fakeGit(committed))).toBeNull();
+    expect(readReportPath("/w/x.xml", "abc123def", fakeGit({ ...committed, "rev-parse HEAD": null }))).toBeNull();
+  });
+
+  it("writes the path with forward slashes", () => {
+    expect(readReportPath("C:/w/x.xml", null, fakeGit({ ...committed, "ls-files --full-name": "reports\\junit.xml" }))).toBe("reports/junit.xml");
   });
 });

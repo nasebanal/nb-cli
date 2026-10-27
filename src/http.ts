@@ -12,6 +12,11 @@ export interface RequestOptions {
   method: string;
   query?: Record<string, string | undefined>;
   body?: unknown;
+  /** Raw bytes instead of JSON (an attached report). */
+  rawBody?: Uint8Array;
+  contentType?: string;
+  /** Extra request headers (an API that needs one on every call, such as the catalog's active organization). */
+  headers?: Record<string, string>;
   token?: string;
 }
 
@@ -50,11 +55,15 @@ export async function request(opts: RequestOptions): Promise<ApiResponse> {
 
   const headers: Record<string, string> = { Accept: "application/json" };
   if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
+  Object.assign(headers, opts.headers);
 
   const init: RequestInit = { method: opts.method.toUpperCase(), headers };
   if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(opts.body);
+  } else if (opts.rawBody !== undefined) {
+    headers["Content-Type"] = opts.contentType ?? "application/octet-stream";
+    init.body = opts.rawBody as unknown as RequestInit["body"];
   }
 
   let res: Response;
