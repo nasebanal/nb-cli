@@ -59,7 +59,7 @@ export interface PushParams {
   dryRun?: boolean;
 }
 
-type Envelope<T> = { success: boolean; data: T };
+export type Envelope<T> = { success: boolean; data: T };
 
 /** The catalog's host for the active environment (`NB_SPECS_BASE_URL` overrides; the CLI ships no spec for this API). */
 export function specsBaseUrl(env: Environment): string {
@@ -114,25 +114,25 @@ export function specNameFor(text: string, file: string, asked?: string): string 
   return name.slice(0, 100);
 }
 
-function headersOf(conn: SpecsConnection) {
+export function headersOf(conn: SpecsConnection) {
   return { baseUrl: conn.baseUrl, token: conn.token, headers: { "X-Active-Organization-Id": conn.org } };
 }
 
-function reasonOf(err: unknown): string {
+export function reasonOf(err: unknown): string {
   if (err instanceof ApiError) return (err.data as { error?: { message?: string } } | undefined)?.error?.message ?? err.message;
   return (err as Error).message;
 }
 
 const codeOf = (err: unknown): string | undefined => (err instanceof ApiError ? (err.data as { error?: { code?: string } } | undefined)?.error?.code : undefined);
 
-interface SpecRow {
+export interface SpecRow {
   id: string;
   name: string;
   group_id: string | null;
   latest_version: number;
 }
 
-async function findSpec(conn: SpecsConnection, name: string, id?: string): Promise<SpecRow | null> {
+export async function findSpec(conn: SpecsConnection, name: string, id?: string): Promise<SpecRow | null> {
   if (id) {
     try {
       const res = await request({ ...headersOf(conn), method: "GET", path: `/api/v1/specs/${encodeURIComponent(id)}` });

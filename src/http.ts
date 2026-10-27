@@ -17,6 +17,12 @@ export interface RequestOptions {
   contentType?: string;
   /** Extra request headers (an API that needs one on every call, such as the catalog's active organization). */
   headers?: Record<string, string>;
+  /**
+   * Keep a successful body exactly as received (`data` is the text). Without it a body that happens to be JSON is
+   * parsed, which loses its bytes: a downloaded OpenAPI document must come back as it was uploaded. An error body is
+   * always parsed.
+   */
+  raw?: boolean;
   token?: string;
 }
 
@@ -75,7 +81,7 @@ export async function request(opts: RequestOptions): Promise<ApiResponse> {
 
   const text = await res.text();
   let data: unknown = text;
-  if (text) {
+  if (text && !(opts.raw && res.ok)) {
     try {
       data = JSON.parse(text);
     } catch {

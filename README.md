@@ -161,6 +161,37 @@ It is made to run on **every commit**:
   happen. `NB_SPECS_BASE_URL` points it at another host (local: `http://localhost:8792`).
 - In GitHub Actions the spec's id is written to `$GITHUB_OUTPUT` as `spec_id`.
 
+### Reading a version back (`nb specs pull`, `nb specs versions`)
+
+A pipeline can work from the catalog's document instead of a copy kept in a repository (a
+contract test with Specmatic against the API's provider side, a stub for a consumer, a client
+generator):
+
+```bash
+nb specs versions --name "Billing API"                      # versions newest first, each with its sha256
+nb specs pull --name "Billing API" --spec-version 3 --out spec.yaml
+nb specs pull --id kMsl4TXEMmeN --spec-version 3 --hash <sha256> --out spec.yaml   # pinned: fails if it differs
+nb specs pull --name "Billing API" > spec.yaml              # latest; the document is all of stdout
+```
+
+- **`--spec-version` is the catalog's version number** (1, 2, 3...: one per `nb specs push` that
+  changed the document). It is not the API's URL version (`v1`, `v2`, the label of a test result
+  in `nb assurance report upload --api-version`), not the document's own `info.version`, and not
+  the CLI's own `nb --version`.
+  Absent or `latest` is the newest; **pin a number in a pipeline**, `latest` moves.
+- **The document comes back exactly as it was uploaded** (the bytes: a JSON document is not
+  parsed and re-printed), and its SHA-256 is checked against the `content_hash` the catalog keeps
+  for that version, so a document that did not arrive intact fails. `--hash <sha256>` pins what
+  the pipeline expects, so a version that was replaced, or a name that now points at another
+  spec, fails instead of testing the wrong thing. `nb specs versions` prints the hashes.
+- A spec is named by `--id` (a rename cannot change it) or by `--name` (matched ignoring case).
+  `--org <id|personal>` / `$NB_SPECS_ORG` and `NB_SPECS_BASE_URL` work as for `push`. With `--out`
+  the details are printed as JSON; without it they go to stderr. In GitHub Actions `spec_id`,
+  `spec_version` and `spec_hash` are written to `$GITHUB_OUTPUT`.
+- The catalog has no "released" mark yet: unlike the `@nasebanal/api-specs-*` packages, which
+  only advance once the provider has deployed, a pull of `latest` can return a version that
+  nothing implements. Pinning a version (and its hash) is the safe way to use it today.
+
 ## Installation
 
 The CLI installs the `nb` command. Node ≥ 20 is required.
