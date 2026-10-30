@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
-import { MAX_CASES, buildReportUploadCommand, checkApiVersion, checkProjectId, checkSpecEnvironment, checkSpecId, checkProvider, checkReportPath, checkSuite, parseMetrics, parseReport, prepareAttachment, toCases } from "./upload.js";
+import { MAX_CASES, buildReportUploadCommand, checkApiVersion, checkRepoUrl, checkProjectId, checkSpecEnvironment, checkSpecId, checkProvider, checkReportPath, checkSuite, parseMetrics, parseReport, prepareAttachment, toCases } from "./upload.js";
 
 const JUNIT = `<testsuites><testsuite name="s"><testcase classname="c" name="a" time="1.5"/><testcase classname="c" name="b"><failure message="nope"/></testcase></testsuite></testsuites>`;
 const LOCUST_STATS =
@@ -199,6 +199,7 @@ describe("nb assurance report upload", () => {
       branch: "main",
       ci_url: "https://github.com/nasebanal/nb-target-api/actions/runs/555",
       provider: "github",
+      repo_url: "https://github.com/nasebanal/nb-target-api",
     });
     expect(calls[2].body.suite).toMatchObject({ kind: "unit", tool: "vitest", status: "failed", tests: { total: 2, passed: 1, failed: 1, skipped: 0 }, duration_ms: 1500 });
     expect(JSON.parse(stdout.join(""))).toMatchObject({ project_id: "new1", project_created: true, run_id: "run1", replaced: false });
@@ -517,6 +518,13 @@ describe("the link to the report in the repository", () => {
     vi.stubEnv("CI_PIPELINE_ID", "5");
     await run(["--file", junitFile(), "--kind", "unit", "--tool", "vitest"]);
     expect(calls.find((c) => c.url.pathname.endsWith("/results"))!.body.run.provider).toBe("gitlab");
+  });
+
+  it("--repo-url is sent as given (without a trailing slash), and refused when it is not a plain http(s) address", async () => {
+    stubApi({ id: "p1" });
+    await run([...base(), "--repo-url", "https://gitlab.example.com/group/app/"]);
+    expect(calls.find((c) => c.url.pathname.endsWith("/results"))!.body.run.repo_url).toBe("https://gitlab.example.com/group/app");
+    for (const bad of ["javascript:alert(1)", "not a url", "https://u:p@h/a", "https://h/a?x=1", "https://h/a#f"]) expect(() => checkRepoUrl(bad)).toThrow(/--repo-url/);
   });
 
   it("--report-path is sent as given, and refused when it climbs out of the repository", async () => {

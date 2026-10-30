@@ -17,6 +17,8 @@ export interface CiInfo {
   /** Default project name and repository. */
   project: string | null;
   repo: string | null;
+  /** The repository's web address on its host (a self-hosted GitLab / GitHub Enterprise has no other way to tell). */
+  repoUrl: string | null;
 }
 
 export interface GitInfo {
@@ -81,6 +83,7 @@ export function detectCi(env: NodeJS.ProcessEnv, git: () => GitInfo = readGit, n
       ciUrl: repo && runId ? `${server}/${repo}/actions/runs/${runId}` : null,
       project: repo,
       repo,
+      repoUrl: repo ? `${server.replace(/\/+$/, "")}/${repo}` : null,
     };
   }
   if (env.GITLAB_CI === "true") {
@@ -94,6 +97,7 @@ export function detectCi(env: NodeJS.ProcessEnv, git: () => GitInfo = readGit, n
       ciUrl: nonEmpty(env.CI_PIPELINE_URL),
       project: path,
       repo: path && host && host !== "gitlab.com" ? `${host}/${path}` : path,
+      repoUrl: nonEmpty(env.CI_PROJECT_URL) ?? (path && host ? `https://${host}/${path}` : null),
     };
   }
   const { sha, branch } = git();
@@ -106,5 +110,6 @@ export function detectCi(env: NodeJS.ProcessEnv, git: () => GitInfo = readGit, n
     ciUrl: null,
     project: null,
     repo: null,
+    repoUrl: null,
   };
 }
