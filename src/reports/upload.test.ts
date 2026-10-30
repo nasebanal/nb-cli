@@ -37,7 +37,7 @@ afterEach(() => {
 });
 
 /** A fake Assurance API: `existing` is the project the name lookup finds (if any). */
-function stubApi(existing: { id: string; spec_id?: string | null; spec_environment?: string | null } | null, opts: { conflictOnCreate?: boolean; resultsStatus?: number; attachmentStatus?: number } = {}) {
+function stubApi(existing: { id: string; repo?: string | null; spec_id?: string | null; spec_environment?: string | null } | null, opts: { conflictOnCreate?: boolean; resultsStatus?: number; attachmentStatus?: number } = {}) {
   let created = false;
   vi.stubGlobal(
     "fetch",
@@ -516,7 +516,7 @@ describe("the link to the report in the repository", () => {
     vi.stubEnv("CI_PROJECT_PATH", "g/app");
     vi.stubEnv("CI_PIPELINE_ID", "5");
     await run(["--file", junitFile(), "--kind", "unit", "--tool", "vitest"]);
-    expect(calls.at(-1)!.body.run.provider).toBe("gitlab");
+    expect(calls.find((c) => c.url.pathname.endsWith("/results"))!.body.run.provider).toBe("gitlab");
   });
 
   it("--report-path is sent as given, and refused when it climbs out of the repository", async () => {
@@ -843,3 +843,44 @@ describe("--spec-file: the catalog, the project and the result in one command", 
 
 import { createHash } from "node:crypto";
 const hashOf = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+
+describe("the project's repository follows the CI (the latest sender wins)", () => {
+  const base = () => ["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--project", "demo", "--run-key", "k", "--repo", "acme/app"];
+  const patches = () => calls.filter((c) => c.method === "PATCH");
+
+  it("overwrites a repository that differs, and says what it was", async () => {
+    stubApi({ id: "p9", repo: "acme/old" });
+    await run(base());
+    expect(patches().map((c) => c.body)).toEqual([{ repo: "acme/app" }]);
+    expect(stderr.join("")).toContain("Repository of the project set to acme/app (was acme/old)");
+  });
+
+  it("fills in a repository that was never set", async () => {
+    stubApi({ id: "p9", repo: null });
+    await run(base());
+    expect(patches().map((c) => c.body)).toEqual([{ repo: "acme/app" }]);
+    expect(stderr.join("")).toContain("(was not set)");
+  });
+
+  it("writes nothing when it is the same: a pipeline on every commit leaves the project alone", async () => {
+    stubApi({ id: "p9", repo: "acme/app" });
+    await run(base());
+    expect(patches()).toEqual([]);
+  });
+
+  it("writes nothing for a project it just created, and nothing without a repository", async () => {
+    stubApi(null);
+    await run(base());
+    expect(patches()).toEqual([]);
+    calls = [];
+    stubApi({ id: "p9", repo: "acme/old" });
+    await run(base().slice(0, -2));
+    expect(patches()).toEqual([]);
+  });
+
+  it("reads the project first when sending by id", async () => {
+    stubApi({ id: "p9", repo: "acme/old" });
+    await run([...base(), "--project-id", "p9"]);
+    expect(calls.map((c) => c.method + " " + c.url.pathname)).toEqual(["POST /api/v1/projects/p9/results", "GET /api/v1/projects/p9", "PATCH /api/v1/projects/p9"]);
+  });
+});
