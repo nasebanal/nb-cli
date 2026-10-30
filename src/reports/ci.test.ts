@@ -21,6 +21,7 @@ describe("detectCi", () => {
       ciUrl: "https://github.com/nasebanal/nb-target-api/actions/runs/123",
       project: "nasebanal/nb-target-api",
       repo: "nasebanal/nb-target-api",
+      repoUrl: "https://github.com/nasebanal/nb-target-api",
     });
   });
 
@@ -28,12 +29,15 @@ describe("detectCi", () => {
     const ci = detectCi({ GITHUB_ACTIONS: "true", GITHUB_REPOSITORY: "o/r", GITHUB_RUN_ID: "9", GITHUB_SERVER_URL: "https://ghe.example.com" }, noGit);
     expect(ci.runKey).toBe("9-1");
     expect(ci.ciUrl).toBe("https://ghe.example.com/o/r/actions/runs/9");
+    expect(ci.repoUrl).toBe("https://ghe.example.com/o/r");
   });
 
   it("reads GitLab CI, prefixing the host for a self-hosted server only", () => {
     const base = { GITLAB_CI: "true", CI_PROJECT_PATH: "group/sub/app", CI_PIPELINE_ID: "77", CI_COMMIT_SHA: "def", CI_COMMIT_REF_NAME: "dev", CI_PIPELINE_URL: "https://gl/p/77" };
     expect(detectCi({ ...base, CI_SERVER_HOST: "gitlab.com" }, noGit)).toMatchObject({ provider: "gitlab", runKey: "77", repo: "group/sub/app", project: "group/sub/app", branch: "dev", ciUrl: "https://gl/p/77" });
     expect(detectCi({ ...base, CI_SERVER_HOST: "git.corp.example" }, noGit).repo).toBe("git.corp.example/group/sub/app");
+    expect(detectCi({ ...base, CI_SERVER_HOST: "git.corp.example" }, noGit).repoUrl).toBe("https://git.corp.example/group/sub/app");
+    expect(detectCi({ ...base, CI_SERVER_HOST: "git.corp.example", CI_PROJECT_URL: "https://git.corp.example/group/sub/app" }, noGit).repoUrl).toBe("https://git.corp.example/group/sub/app");
   });
 
   it("falls back to git with a per-day key, and to nothing outside a repository", () => {

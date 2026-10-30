@@ -92,6 +92,10 @@ nb assurance report upload --dir locust/logs/20261001_090000
   relative to the repository root, so Assurance can link to the file at that commit.
   A report that CI has just generated is not in the commit, so no path is sent;
   override with `--report-path`.
+  The repository's web address is sent too (`repo_url`, detected from `GITHUB_SERVER_URL` /
+  `CI_PROJECT_URL`; override with `--repo-url`), so the link also works on a self-hosted
+  GitLab or GitHub Enterprise. The CI's repository also replaces the project's `repo`
+  (the latest sender wins).
 - **Tie the project to its API in the catalog (`--spec-id`, `--spec-environment`):**
   `--spec-id <id>` links the project to a spec of the API catalog (its id in Assurance /
   Specs), `--spec-environment production` says which environment of it the project covers

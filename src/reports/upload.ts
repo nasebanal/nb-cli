@@ -66,6 +66,20 @@ export function checkProvider(raw: string): RunProvider {
   return v as RunProvider;
 }
 
+/** `--repo-url`: an http(s) address without credentials, query or fragment, as the API accepts it. */
+export function checkRepoUrl(v: string): string {
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    throw new Error("--repo-url must be an http(s) address, e.g. https://gitlab.example.com/group/app");
+  }
+  if ((u.protocol !== "https:" && u.protocol !== "http:") || u.username || u.password || u.search || u.hash) {
+    throw new Error("--repo-url must be an http(s) address without credentials, query or fragment");
+  }
+  return `${u.origin}${u.pathname.replace(/\/+$/, "")}`;
+}
+
 /** `--report-path`: a path relative to the repository root, as the API accepts it. */
 export function checkReportPath(raw: string): string {
   const v = raw.trim();
@@ -162,7 +176,7 @@ export interface SuitePayload {
 }
 
 export interface ReportPayload {
-  run: { key: string; commit_sha?: string; branch?: string; ci_url?: string; provider?: RunProvider };
+  run: { key: string; commit_sha?: string; branch?: string; ci_url?: string; provider?: RunProvider; repo_url?: string };
   suite: SuitePayload;
 }
 
@@ -489,6 +503,7 @@ interface UploadOptions {
   project?: string;
   projectId?: string;
   repo?: string;
+  repoUrl?: string;
   provider?: string;
   reportPath?: string;
   runKey?: string;
@@ -608,6 +623,7 @@ export function buildReportUploadCommand(): Command {
     .option("--spec-environment <name>", "which environment of that API the project covers (production, staging, ...); needs --spec-id")
     .option("--project-id <id>", "send to this project by id (or $NB_ASSURANCE_PROJECT_ID): no lookup by name and nothing is created, so a rename never moves the results; recommended for a pipeline once the project exists")
     .option("--repo <repo>", "repository recorded on the project; the latest sender wins (CI: detected)")
+    .option("--repo-url <url>", "the repository's web address on its host, e.g. https://gitlab.example.com/group/app (CI: detected); lets Evolution link to the report on a self-hosted GitLab / GitHub Enterprise")
     .option("--provider <provider>", `the CI provider: ${RUN_PROVIDERS.join(" | ")} (CI: detected)`)
     .option("--report-path <path>", "the report file's path in the repository, relative to its root (default: detected, and only for a file committed at the reported commit)")
     .option("--run-key <key>", "identity of the pipeline run (CI: detected); all jobs of a run share it")
@@ -688,6 +704,7 @@ export function buildReportUploadCommand(): Command {
       const branch = opts.branch ?? ci.branch;
       const ciUrl = opts.ciUrl ?? ci.ciUrl;
       const provider = opts.provider !== undefined ? checkProvider(opts.provider) : ci.provider === "local" ? undefined : ci.provider;
+      const repoUrl = opts.repoUrl !== undefined ? checkRepoUrl(opts.repoUrl) : ci.repoUrl;
       const reportPath = opts.reportPath !== undefined ? checkReportPath(opts.reportPath) : readReportPath(file, commit);
       if (reportPath) parsed.suite.report_path = reportPath;
 
@@ -698,6 +715,7 @@ export function buildReportUploadCommand(): Command {
           ...(branch ? { branch } : {}),
           ...(ciUrl ? { ci_url: ciUrl } : {}),
           ...(provider ? { provider } : {}),
+          ...(repoUrl ? { repo_url: repoUrl } : {}),
         },
         suite: parsed.suite,
       };
