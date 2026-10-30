@@ -296,6 +296,8 @@ export interface SpecLink {
 interface ProjectRef {
   id: string;
   created: boolean;
+  /** The repository the project records now (unknown until it was read). */
+  repo?: string | null;
   /** What the project is linked to now (unknown until it was read). */
   spec?: { id: string | null; environment: string | null };
   /** The link was set as the project was created. */
@@ -314,9 +316,9 @@ export async function ensureProject(
 ): Promise<ProjectRef> {
   const find = async (): Promise<ProjectRef | null> => {
     const res = await request({ ...conn, method: "GET", path: "/api/v1/projects", query: { name } });
-    const list = (res.data as Envelope<{ data: { id: string; spec_id?: string | null; spec_environment?: string | null }[] }>).data.data;
+    const list = (res.data as Envelope<{ data: { id: string; repo?: string | null; spec_id?: string | null; spec_environment?: string | null }[] }>).data.data;
     const hit = list[0];
-    return hit ? { id: hit.id, created: false, spec: { id: hit.spec_id ?? null, environment: hit.spec_environment ?? null } } : null;
+    return hit ? { id: hit.id, created: false, repo: hit.repo, spec: { id: hit.spec_id ?? null, environment: hit.spec_environment ?? null } } : null;
   };
 
   const existing = await find();
@@ -332,7 +334,7 @@ export async function ensureProject(
       // A new project is born linked: nothing to compare, nothing to patch afterwards.
       body: { name, ...(repo ? { repo } : {}), ...(spec ? { spec_id: spec.id, ...(spec.environment ? { spec_environment: spec.environment } : {}) } : {}) },
     });
-    return { id: (res.data as Envelope<{ id: string }>).data.id, created: true, spec: spec ? { id: spec.id, environment: spec.environment ?? null } : undefined, specLinked: !!spec };
+    return { id: (res.data as Envelope<{ id: string }>).data.id, created: true, repo, spec: spec ? { id: spec.id, environment: spec.environment ?? null } : undefined, specLinked: !!spec };
   } catch (err) {
     // Another job of the same pipeline created it between our lookup and our create.
     if (err instanceof ApiError && err.status === 409) {
@@ -372,6 +374,23 @@ export interface UploadResult {
   suite_id: string;
   replaced: boolean;
   spec?: SpecResult;
+  /** The repository the project had before this upload, when this upload changed it (the CI's repository wins). */
+  repo_changed_from?: string | null;
+}
+
+/**
+ * The repository the CI reports is the project's repository: the latest sender wins, whether the old value was typed in
+ * or came from an earlier upload. (To follow another repository, use another project.) Only a difference is written.
+ */
+async function syncRepo(conn: Connection, project: ProjectRef, repo: string): Promise<{ changed: boolean; was: string | null }> {
+  let current = project.repo;
+  if (current === undefined) {
+    const res = await request({ ...conn, method: "GET", path: `/api/v1/projects/${encodeURIComponent(project.id)}` });
+    current = (res.data as Envelope<{ repo?: string | null }>).data.repo ?? null;
+  }
+  if (current === repo) return { changed: false, was: current };
+  await request({ ...conn, method: "PATCH", path: `/api/v1/projects/${encodeURIComponent(project.id)}`, body: { repo } });
+  return { changed: true, was: current ?? null };
 }
 
 /**
@@ -416,6 +435,15 @@ export async function uploadReport(p: UploadParams): Promise<UploadResult> {
   }
   const data = (res.data as Envelope<{ run_id: string; suite_id: string; replaced: boolean }>).data;
   const done: UploadResult = { project_id: project.id, project_created: project.created, ...data };
+  if (p.repo) {
+    try {
+      const synced = await syncRepo(p.conn, project, p.repo);
+      if (synced.changed) done.repo_changed_from = synced.was;
+    } catch (err) {
+      const detail = err instanceof ApiError ? ((err.data as { error?: { message?: string } } | undefined)?.error?.message ?? err.message) : (err as Error).message;
+      throw new Error(`The result was reported, but the project's repository could not be updated: ${detail}`);
+    }
+  }
   if (p.spec) {
     // The result is in; a link that fails now leaves it as it is and says so.
     try {
@@ -579,7 +607,7 @@ export function buildReportUploadCommand(): Command {
     .option("--spec-org <id>", "with --spec-file: the organization whose catalog it is (an id), or 'personal' (default; or $NB_SPECS_ORG)")
     .option("--spec-environment <name>", "which environment of that API the project covers (production, staging, ...); needs --spec-id")
     .option("--project-id <id>", "send to this project by id (or $NB_ASSURANCE_PROJECT_ID): no lookup by name and nothing is created, so a rename never moves the results; recommended for a pipeline once the project exists")
-    .option("--repo <repo>", "repository recorded on a newly created project (CI: detected)")
+    .option("--repo <repo>", "repository recorded on the project; the latest sender wins (CI: detected)")
     .option("--provider <provider>", `the CI provider: ${RUN_PROVIDERS.join(" | ")} (CI: detected)`)
     .option("--report-path <path>", "the report file's path in the repository, relative to its root (default: detected, and only for a file committed at the reported commit)")
     .option("--run-key <key>", "identity of the pipeline run (CI: detected); all jobs of a run share it")
@@ -725,6 +753,9 @@ export function buildReportUploadCommand(): Command {
           `${pushed ? `, spec ${pushed.name} v${pushed.version} (${pushed.action.replace("_", " ")})` : ""}` +
           `${result.spec ? `, catalog ${result.spec.id}${result.spec.environment ? ` (${result.spec.environment})` : ""} ${result.spec.changed ? (result.spec.was ? `(changed from ${result.spec.was})` : "(linked)") : "(already linked)"}` : ""}\n`,
       );
+      if (result.repo_changed_from !== undefined) {
+        process.stderr.write(`  Repository of the project set to ${repo} (was ${result.repo_changed_from ?? "not set"}); the latest sender wins\n`);
+      }
       if (!projectId) {
         process.stderr.write(
           `  Pin it so a rename or a typo cannot send results elsewhere: --project-id ${result.project_id} (or NB_ASSURANCE_PROJECT_ID=${result.project_id})\n`,
