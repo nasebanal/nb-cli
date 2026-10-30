@@ -41,6 +41,8 @@ export interface PushResult {
   group_id: string | null;
   action: PushAction;
   content_hash: string;
+  /** Set when the push renamed the spec (or, in a dry run, would): the name it had. */
+  renamed_from?: string;
 }
 
 export interface PushParams {
@@ -55,6 +57,8 @@ export interface PushParams {
   note?: string;
   /** Push to this spec by id: a rename of the spec cannot make a second one. */
   id?: string;
+  /** With `id`: also rename the spec to `name` (default: the document's `info.title`) when it is called something else. */
+  rename?: boolean;
   /** Read what is there, write nothing, say what would happen. */
   dryRun?: boolean;
 }
@@ -180,16 +184,32 @@ async function pushSpecInner(p: PushParams): Promise<PushResult> {
   const name = specNameFor(text, p.file, p.name);
   const note = p.note !== undefined ? p.note.trim().slice(0, MAX_NOTE) || undefined : undefined;
 
-  const existing = await findSpec(p.conn, name, p.id);
+  if (p.rename && !p.id) throw new Error("--rename needs --id: without an id the spec is found by its name, so there is nothing to rename");
+  let existing = await findSpec(p.conn, name, p.id);
+
+  // A rename only on request: a spec named by hand in the catalog is not renamed back to the title on every push.
+  let renamedFrom: string | undefined;
+  if (existing && p.rename && existing.name !== name) {
+    renamedFrom = existing.name;
+    if (!p.dryRun) {
+      try {
+        await request({ ...headersOf(p.conn), method: "PATCH", path: `/api/v1/specs/${encodeURIComponent(existing.id)}`, body: { name } });
+      } catch (err) {
+        throw new Error(`The catalog refused the new name '${name}': ${reasonOf(err)}`);
+      }
+    }
+    existing = { ...existing, name };
+  }
+  const renamed = renamedFrom ? { renamed_from: renamedFrom } : {};
 
   if (existing) {
     // Nothing to upload when the file is already the latest version: the hash settles it without sending the document.
     const versions = await request({ ...headersOf(p.conn), method: "GET", path: `/api/v1/specs/${encodeURIComponent(existing.id)}/versions` });
     const latest = (versions.data as Envelope<{ data: { version: number; content_hash?: string }[] }>).data.data[0];
     if (latest?.content_hash === hash) {
-      return { id: existing.id, name: existing.name, version: latest.version, group_id: existing.group_id, action: "unchanged", content_hash: hash };
+      return { id: existing.id, name: existing.name, version: latest.version, group_id: existing.group_id, action: "unchanged", content_hash: hash, ...renamed };
     }
-    if (p.dryRun) return { id: existing.id, name: existing.name, version: existing.latest_version + 1, group_id: existing.group_id, action: "new_version", content_hash: hash };
+    if (p.dryRun) return { id: existing.id, name: existing.name, version: existing.latest_version + 1, group_id: existing.group_id, action: "new_version", content_hash: hash, ...renamed };
     try {
       const res = await request({
         ...headersOf(p.conn),
@@ -198,10 +218,10 @@ async function pushSpecInner(p: PushParams): Promise<PushResult> {
         body: { content: text, ...(note ? { note } : {}) },
       });
       const version = (res.data as Envelope<{ version: number }>).data.version;
-      return { id: existing.id, name: existing.name, version, group_id: existing.group_id, action: "new_version", content_hash: hash };
+      return { id: existing.id, name: existing.name, version, group_id: existing.group_id, action: "new_version", content_hash: hash, ...renamed };
     } catch (err) {
       // Another job pushed the same document between our comparison and our upload: the catalog says so, and that is the goal.
-      if (codeOf(err) === "UNCHANGED") return { id: existing.id, name: existing.name, version: existing.latest_version, group_id: existing.group_id, action: "unchanged", content_hash: hash };
+      if (codeOf(err) === "UNCHANGED") return { id: existing.id, name: existing.name, version: existing.latest_version, group_id: existing.group_id, action: "unchanged", content_hash: hash, ...renamed };
       throw new Error(`The catalog refused the new version: ${reasonOf(err)}`);
     }
   }

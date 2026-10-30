@@ -147,6 +147,13 @@ nb assurance report upload --dir locust/logs/20261001_090000
 specs, Evolution): a new spec, or a new version of the one that has the same name (or `--id`).
 It is made to run on **every commit**:
 
+- **A retitled document needs `--id`.** Without it the spec is found by its name (the document's
+  `info.title`), so a new title registers a second spec next to the old one. `--id <id>` pushes to
+  the spec you mean (a pipeline can read the id from `spec_id` of an earlier run), and adding
+  `--rename` also renames the spec to `--name` (default: the new `info.title`); the old name is
+  printed (`renamed_from` in the JSON). A rename happens only on request, so a name set by hand in
+  the catalog is not overwritten on every push, and `--rename` without `--id` is refused.
+
 - **Nothing is uploaded when the file is already the latest version.** The CLI compares the
   document's SHA-256 with the `content_hash` the catalog keeps for the latest version before it
   sends anything; the same bytes print `unchanged (already vN: nothing uploaded)`. (The catalog

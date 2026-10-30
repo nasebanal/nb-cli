@@ -19,6 +19,7 @@ interface PushOptions {
   id?: string;
   org?: string;
   dryRun?: boolean;
+  rename?: boolean;
   env?: string;
   token?: string;
 }
@@ -29,6 +30,7 @@ export function buildPushCommand(): Command {
     .requiredOption("--file <path>", "the OpenAPI document (YAML or JSON, up to 2 MiB)")
     .option("--name <name>", "the spec's name in the catalog (default: the document's info.title, then the file's name)")
     .option("--id <id>", "push to this spec by id: a rename cannot make a second one")
+    .option("--rename", "with --id: also rename the spec to --name (default: the document's info.title) when it is called something else")
     .option("--group <name>", "file a NEW spec in this group (made when missing); default none. An existing spec is never moved by a push")
     .option("--description <text>", "a new spec's description")
     .option("--note <text>", "what changed, shown in the version list (default: the commit, branch and CI run)")
@@ -47,12 +49,13 @@ export function buildPushCommand(): Command {
         description: opts.description,
         note: opts.note ?? ciNote(ci, undefined),
         id: opts.id,
+        rename: opts.rename,
         dryRun: opts.dryRun,
       });
       printJson(result);
       exportGithubOutput("spec_id", result.id);
       const what = { created: "created (v1)", new_version: `new version v${result.version}`, unchanged: `unchanged (already v${result.version}: nothing uploaded)` }[result.action];
-      process.stderr.write(`${opts.dryRun ? "(dry run) " : ""}✓ ${result.name} -> ${what}\n`);
+      process.stderr.write(`${opts.dryRun ? "(dry run) " : ""}✓ ${result.renamed_from ? `${result.renamed_from} renamed to ` : ""}${result.name} -> ${what}\n`);
     });
 }
 
