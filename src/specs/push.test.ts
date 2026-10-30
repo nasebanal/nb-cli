@@ -70,6 +70,7 @@ function catalog(world: World = {}) {
         const hit = specs.find((s) => s.id === one[1]);
         return hit ? json(200, { success: true, data: hit }) : json(404, { success: false, error: { code: "NOT_FOUND", message: "Spec not found" } });
       }
+      if (method === "PATCH" && one) return json(200, { success: true, data: { id: one[1], name: body.name } });
       const versions = url.pathname.match(/^\/api\/v1\/specs\/([^/]+)\/versions$/);
       if (versions && method === "GET") {
         const hit = specs.find((s) => s.id === versions[1])!;
@@ -221,6 +222,48 @@ describe("pushSpec: a spec the catalog already has", () => {
     expect((await pushSpec({ conn, file: file(), id: "s1" })).id).toBe("s1");
     expect(calls[0].path).toBe("/api/v1/specs/s1");
     expect(calls.some((c) => c.path === "/api/v1/specs")).toBe(false);
+  });
+
+  it("renames the spec to the document's title on --rename, before the new version, and says what it was called", async () => {
+    catalog({ specs: [known({ name: "NASEBANAL - Billing API", hash: "old" })] });
+    const r = await pushSpec({ conn, file: file(DOC_V2), id: "s1", rename: true });
+    expect(r).toMatchObject({ id: "s1", name: "Billing API", action: "new_version", renamed_from: "NASEBANAL - Billing API" });
+    expect(calls.filter((c) => c.method !== "GET").map((c) => `${c.method} ${c.path}`)).toEqual(["PATCH /api/v1/specs/s1", "POST /api/v1/specs/s1/versions"]);
+    expect(calls.find((c) => c.method === "PATCH")!.body).toEqual({ name: "Billing API" });
+  });
+
+  it("renames to --name when one is given, and also when the file itself is unchanged", async () => {
+    catalog({ specs: [known({ name: "Old", hash: hashText(DOC) })] });
+    const r = await pushSpec({ conn, file: file(), id: "s1", rename: true, name: "Billing (prod)" });
+    expect(r).toMatchObject({ name: "Billing (prod)", action: "unchanged", renamed_from: "Old" });
+    expect(calls.find((c) => c.method === "PATCH")!.body).toEqual({ name: "Billing (prod)" });
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("does not rename without --rename (a name set by hand stays), nor when the name already matches", async () => {
+    catalog({ specs: [known({ name: "Mine", hash: "old" })] });
+    const r = await pushSpec({ conn, file: file(DOC_V2), id: "s1" });
+    expect(r.name).toBe("Mine");
+    expect(r).not.toHaveProperty("renamed_from");
+    calls = [];
+    catalog({ specs: [known({ name: "Billing API", hash: "old" })] });
+    expect(await pushSpec({ conn, file: file(DOC_V2), id: "s1", rename: true })).not.toHaveProperty("renamed_from");
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+
+  it("only says what a rename would do in a dry run", async () => {
+    catalog({ specs: [known({ name: "Old", hash: "old" })] });
+    const r = await pushSpec({ conn, file: file(DOC_V2), id: "s1", rename: true, dryRun: true });
+    expect(r).toMatchObject({ name: "Billing API", renamed_from: "Old" });
+    expect(calls.some((c) => c.method === "PATCH" || c.method === "POST")).toBe(false);
+  });
+
+  it("refuses --rename without --id, and explains a refused name", async () => {
+    catalog({ specs: [known()] });
+    await expect(pushSpec({ conn, file: file(), rename: true })).rejects.toThrow(/--rename needs --id/);
+    catalog({ specs: [known({ name: "Old", hash: "old" })], fail: { "PATCH /api/v1/specs/s1": { status: 409, code: "NAME_TAKEN", message: "name is taken" } } });
+    await expect(pushSpec({ conn, file: file(DOC_V2), id: "s1", rename: true })).rejects.toThrow(/refused the new name 'Billing API': name is taken/);
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
   });
 
   it("says plainly when the id is not the owner's", async () => {
