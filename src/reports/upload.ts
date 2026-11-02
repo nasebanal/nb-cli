@@ -163,6 +163,8 @@ export interface SuitePayload {
   label?: string;
   /** The version of the tool that produced the report; informational. */
   tool_version?: string;
+  /** The SHA-256 of the API contract document the result was produced against (64 lowercase hex); informational. */
+  spec_hash?: string;
   /** The report file's path in the repository, relative to its root; only for a committed file. */
   report_path?: string;
   status: "passed" | "failed";
@@ -236,6 +238,8 @@ export interface ParseOptions {
   label?: string;
   /** The version of the tool that produced the report. */
   toolVersion?: string;
+  /** The SHA-256 of the contract the result was produced against. */
+  specHash?: string;
   /** Forced pass/fail; otherwise derived from the report. */
   status?: "passed" | "failed";
   maxFailRatio: number;
@@ -256,6 +260,7 @@ export function parseReport(opts: ParseOptions): ParsedReport {
     ...(opts.components && opts.components.length > 0 ? { components: opts.components } : {}),
     ...(opts.label ? { label: opts.label } : {}),
     ...(opts.toolVersion ? { tool_version: opts.toolVersion } : {}),
+    ...(opts.specHash ? { spec_hash: opts.specHash } : {}),
   };
 
   if (opts.format === "junit") {
@@ -493,6 +498,8 @@ interface UploadOptions {
   component?: string[];
   label?: string;
   toolVersion?: string;
+  specHash?: string;
+  contractFile?: string;
   attach?: string;
   specId?: string;
   specEnvironment?: string;
@@ -538,6 +545,23 @@ function checkToolVersion(raw: string | undefined): string | undefined {
   if (version === "") fail("--tool-version must not be empty");
   if (version.length > 50) fail("--tool-version must be 50 characters or fewer");
   return version;
+}
+
+/** The `--spec-hash`: a SHA-256 in hex (what `nb specs versions` prints), lower-cased because the API takes lowercase only. */
+function checkSpecHash(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const hash = raw.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(hash)) fail("--spec-hash must be a SHA-256 in hex (64 characters), e.g. the sha256 `nb specs versions` prints");
+  return hash;
+}
+
+/** The `--contract-file`: the hash the catalog would keep as `content_hash` for this document (SHA-256 of its text). */
+function hashOfContractFile(file: string): string {
+  try {
+    return hashText(readSpecFile(file));
+  } catch (err) {
+    return fail(String((err as Error).message).replace(/^--file:/, "--contract-file:"));
+  }
 }
 
 /** The `--component` names: trimmed, no empty one, no two alike ignoring case, within the API's limits. */
@@ -611,6 +635,8 @@ export function buildReportUploadCommand(): Command {
     .option("--component <name>", "a component the result is for (e.g. frontend, backend), repeatable when it covers several (e.g. an end-to-end test: --component frontend --component backend); new names are created in the project; leave it out for the component `default`", (v: string, all: string[] = []) => [...all, v])
     .option("--label <name>", "tells apart results that are otherwise the same, such as two scans of one tool on the same components (e.g. --label baseline, --label full-scan); part of the result's identity, so the same label again replaces the result; optional")
     .option("--tool-version <version>", "the version of the tool that produced the report (e.g. 9.1.0): informational, shown next to the tool, handy when a tool's new version changes its layout; optional")
+    .option("--spec-hash <sha256>", "the SHA-256 of the API contract this result was produced against (64 hex characters; the sha256 `nb specs versions` prints for a catalog version): Evolution compares it with the catalog's versions and tells whether the result was produced with the current contract, an older one or an unknown one. Informational, not part of the result's identity; a report sent again replaces it. Exclusive with --contract-file")
+    .option("--contract-file <path>", "the contract document the result was produced against (e.g. node_modules/@nasebanal/api-specs-<api>/spec.yaml): its SHA-256 is sent as --spec-hash would, the same hash the catalog keeps for that document. Exclusive with --spec-hash")
     .option("--metric <key=value>", "an extra number for the suite, repeatable (e.g. --metric high=0 --metric medium=3; for security: critical, high, medium, low, info)", (v: string, all: string[] = []) => [...all, v])
     .option("--api-version <label>", "the API version the result is for (e.g. v1, v2), part of the result's identity next to its kind and components; leave it out for results that hold for every version, such as unit tests. Default: the NB_API_VERSION environment variable (set it once per CI job or branch). A project can require a version for some kinds of result, and then refuses one without it")
     .option("--project <name>", "project name (CI: the repository); found, or created if missing")
@@ -655,6 +681,7 @@ export function buildReportUploadCommand(): Command {
       // The flag wins; NB_API_VERSION (a CI variable) is the default, and an empty one (a CI that declares it but does not set it) is none.
       const versionRaw = opts.apiVersion ?? (process.env.NB_API_VERSION || undefined);
       const apiVersion = versionRaw === undefined ? undefined : checkApiVersion(versionRaw);
+      if (opts.specHash !== undefined && opts.contractFile !== undefined) fail("--spec-hash and --contract-file are exclusive: one gives the hash, the other a file to take it from");
       const parsed = parseReport({
         format,
         kind,
@@ -662,6 +689,7 @@ export function buildReportUploadCommand(): Command {
         components: checkComponents(opts.component),
         label: checkLabel(opts.label),
         toolVersion: checkToolVersion(opts.toolVersion),
+        specHash: opts.contractFile !== undefined ? hashOfContractFile(opts.contractFile) : checkSpecHash(opts.specHash),
         status: opts.status as "passed" | "failed" | undefined,
         maxFailRatio,
         file,
