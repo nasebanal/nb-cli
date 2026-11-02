@@ -69,6 +69,15 @@ NB_API_VERSION=v2 nb assurance report upload --file specmatic/v2/junit.xml --kin
 # a project may require a version for some kinds of result (Assurance > Projects > the project's settings): a result of such a kind
 # without one is refused with 422 API_VERSION_REQUIRED (the message says to pass --api-version or set NB_API_VERSION)
 
+# Which contract the result was produced against: the SHA-256 of the contract document (the catalog's content_hash; `nb specs versions`
+# prints it), so Evolution can tell a result of the current contract from one of an older or an unknown version. Not the API's URL version
+# (--api-version) and not the document's info.version (edited by hand): a hash. Informational, not part of the result's identity.
+nb assurance report upload --file specmatic/junit.xml --kind contract --tool specmatic --spec-hash 9f2c...64 hex characters
+# or let the CLI hash the file the test ran against (a pinned package's spec.yaml hashes to what `nb specs push` of it registered)
+nb assurance report upload --file specmatic/junit.xml --kind contract --tool specmatic \
+  --contract-file node_modules/@nasebanal/api-specs-assurance/spec.yaml
+# needs an Assurance that knows spec_hash (the assurance contract 1.10.0 and later); an older one ignores the field
+
 # Extra numbers for the suite (repeatable), e.g. ZAP's findings by severity - what the Assurance security gate reads
 nb assurance report upload --file zap/report/baseline-junit.xml --kind security --tool zap --metric high=0 --metric medium=3 --metric low=2
 

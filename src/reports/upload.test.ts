@@ -322,6 +322,33 @@ describe("nb assurance report upload", () => {
     await expect(run([...base, "--tool-version", "x".repeat(51)])).rejects.toThrow(/50 characters or fewer/);
   });
 
+  it("--spec-hash records the contract the result was produced against: sent as spec_hash (lower-cased), left out when not given, refused unless 64 hex characters", async () => {
+    stubApi(null);
+    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "contract", "--tool", "specmatic", "--file", junitFile()];
+    const hash = "f2c098a7c93707864edb109c0839bdfe6f34d002c0322fe11bfc400fb4a782ff";
+    await run([...base, "--spec-hash", ` ${hash.toUpperCase()} `]);
+    expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ tool: "specmatic", spec_hash: hash });
+    stdout.length = 0;
+    await run(base);
+    expect(JSON.parse(stdout.join("")).payload.suite.spec_hash).toBeUndefined();
+    await expect(run([...base, "--spec-hash", hash.slice(1)])).rejects.toThrow(/64 characters/);
+    await expect(run([...base, "--spec-hash", `${hash.slice(1)}g`])).rejects.toThrow(/64 characters/);
+    await expect(run([...base, "--spec-hash", " "])).rejects.toThrow(/64 characters/);
+  });
+
+  it("--contract-file sends the SHA-256 of the document, the one the catalog keeps as content_hash; it is exclusive with --spec-hash", async () => {
+    stubApi(null);
+    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "contract", "--tool", "specmatic", "--file", junitFile()];
+    const contract = join(dir, "spec.yaml");
+    const text = "openapi: 3.0.3\ninfo:\n  title: Demo\n  version: 1.0.0\npaths: {}\n";
+    writeFileSync(contract, text);
+    const expected = createHash("sha256").update(text, "utf8").digest("hex");
+    await run([...base, "--contract-file", contract]);
+    expect(JSON.parse(stdout.join("")).payload.suite.spec_hash).toBe(expected);
+    await expect(run([...base, "--contract-file", join(dir, "nope.yaml")])).rejects.toThrow(/--contract-file: not found/);
+    await expect(run([...base, "--contract-file", contract, "--spec-hash", expected])).rejects.toThrow(/exclusive/);
+  });
+
   it("--component refuses an empty or too long name and more than 20, and --suite is gone", async () => {
     stubApi(null);
     const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "unit", "--tool", "vitest", "--file", junitFile()];
