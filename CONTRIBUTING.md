@@ -32,7 +32,7 @@ want to support another version:
 
    ```bash
    nb assurance report upload --dry-run --file your-report.xml \
-     --kind unit --tool vitest --tool-version 9.1.0 --project demo
+     --kind unit --tool vitest --tool-version 9.1.0 --spec-id demo
    ```
 
    Paste the `--dry-run` output (without secrets) into the PR description.
@@ -40,7 +40,7 @@ want to support another version:
 A PR without a real sample of the new format will not be merged: the parser
 decides what Assurance shows, so it has to be checked against the real thing.
 
-The final step, uploading to a live Assurance project, needs an account; the
+The final step, uploading to a live Assurance repository, needs an account; the
 maintainers do that during review.
 
 ## Pull requests

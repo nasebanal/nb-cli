@@ -14,7 +14,8 @@ import { buildAuthCommand } from "./auth.js";
 import { specExists } from "./spec/loader.js";
 import { printError } from "./output.js";
 import { buildReportUploadCommand } from "./reports/upload.js";
-import { buildSpecsCommand } from "./specs/command.js";
+import { attachMonitorSpecOptions } from "./reports/monitors.js";
+import { attachSpecsCommands, buildSpecsCommand } from "./specs/command.js";
 import { buildUpgradeCommand, startUpdateNotifier } from "./update.js";
 
 // Single source of truth for the version: package.json (dist/ and src/ both sit
@@ -33,10 +34,14 @@ program
 
 program.addCommand(buildAuthCommand());
 program.addCommand(buildUpgradeCommand(version));
-program.addCommand(buildSpecsCommand());
 
 for (const api of API_CATALOG) {
   if (!specExists(api.spec)) {
+    // `nb specs push` / `pull` need no contract to run: without one the old standalone group still works.
+    if (api.name === "specs") {
+      program.addCommand(buildSpecsCommand());
+      continue;
+    }
     // Spec not synced yet — register a stub that explains how to fix it rather
     // than crashing the whole CLI.
     program
@@ -55,11 +60,14 @@ for (const api of API_CATALOG) {
   }
   const group = buildApiCommand(api);
   // `assurance report` already holds the generated availability report; the
-  // hand-written `upload` (test-result files -> a project) joins it.
+  // hand-written `upload` (test-result files -> a spec) joins it.
   if (api.name === "assurance") {
     const report = group.commands.find((c) => c.name() === "report") ?? group.command("report").description("Reports");
     report.addCommand(buildReportUploadCommand());
+    attachMonitorSpecOptions(group);
   }
+  // `nb specs`: the generated tree plus the pipeline verbs (`specs push`, `repositories upsert`) and the old direct form.
+  if (api.name === "specs") attachSpecsCommands(group);
   program.addCommand(group);
 }
 

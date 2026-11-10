@@ -1,17 +1,20 @@
 /**
  * `nb assurance report upload` - read a test report on the CI runner, reduce it
- * to the normalised summary, and report it to a NASEBANAL Assurance project.
+ * to the normalised summary, and report it to a NASEBANAL Assurance SPEC (the spec of the API catalog, with the repository
+ * it is tied to: `nb specs specs push`, `nb specs repositories upsert`). The spec is named by id (`--spec-id`, $NB_SPEC_ID) or
+ * by names (`--repository`, optional `--component` / `--group` / `--api-version`, `--spec`), see `resolveSpec`; nothing is registered
+ * by a report. A result has no API version of its own: it belongs to the spec it is reported to (one spec per API version).
  *
  * The same command runs in a pipeline and on a laptop (nb-quickstarts' `make
- * <tool>:report-upload` calls it): it takes its run key, commit, branch and
- * project from the CI environment when there is one, and authenticates with
+ * <tool>:report-upload` calls it): it takes its run key, commit and branch
+ * from the CI environment when there is one, and authenticates with
  * `NB_TOKEN` (a PAT or service-account token) so no browser is needed.
  *
  * The parsing happens here, not on the server: the server stays small, parsers
  * are testable offline, and what is uploaded is a few hundred bytes of summary
  * instead of a megabyte of report.
  */
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { resolveAccessToken, resolveEnv, type Environment } from "../config.js";
@@ -23,7 +26,8 @@ import { parseJunit, type JunitCase, type SuiteFailure } from "./junit.js";
 import { summariseLocust } from "./locust.js";
 import { parseSpecmaticCoverage } from "./specmatic.js";
 import { MAX_ATTACHMENT_BYTES, zipDirectory } from "./zip.js";
-import { checkOrg, ciNote, pushSpec, readSpecFile, specNameFor, hashText, specsBaseUrl, type PushResult } from "../specs/push.js";
+import { checkOrg, hashText, readSpecFile, specsBaseUrl } from "../specs/push.js";
+import { resolveRepositorySpecs, resolveSpec, type ResolvedSpec, type SpecRef } from "../specs/resolve.js";
 
 export const SUITE_KINDS = ["unit", "e2e", "load", "contract", "security"] as const;
 export type SuiteKind = (typeof SUITE_KINDS)[number];
@@ -31,32 +35,16 @@ export type ReportFormat = "junit" | "locust";
 export const RUN_PROVIDERS = ["github", "gitlab", "other"] as const;
 export type RunProvider = (typeof RUN_PROVIDERS)[number];
 
-/** What the API's ids look like (12 letters and digits); anything else is a typo, not a project. */
-const PROJECT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
-
-/** A spec's id in the API catalog (nb-specs-api): letters, digits, `_` and `-`, up to 64. */
+/** What the API's ids look like (12 letters and digits); anything else is a typo, not a spec. */
 const SPEC_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
-const MAX_SPEC_ENVIRONMENT = 40;
 
-/** `--spec-id`: trimmed; it is never looked up here (the catalog is another service; a typo shows as "no spec" in the project). */
-export function checkSpecId(raw: string): string {
-  const v = raw.trim();
-  if (!SPEC_ID_PATTERN.test(v)) throw new Error(`--spec-id '${raw}' is not a catalog spec id (letters, digits, '-' and '_', up to 64)`);
-  return v;
-}
-
-/** `--spec-environment`: which environment of the API the project covers (production, staging, ...). */
-export function checkSpecEnvironment(raw: string): string {
-  const v = raw.trim();
-  if (v === "" || v.length > MAX_SPEC_ENVIRONMENT) throw new Error(`--spec-environment must be 1 to ${MAX_SPEC_ENVIRONMENT} characters`);
-  return v;
-}
-
-/** `--project-id` / `NB_ASSURANCE_PROJECT_ID`: trimmed; empty is none. */
-export function checkProjectId(raw: string | undefined): string | undefined {
+/** `--spec-id` / `NB_SPEC_ID`: trimmed; empty is none. */
+export function checkSpecId(raw: string | undefined): string | undefined {
   const v = raw?.trim();
   if (!v) return undefined;
-  if (!PROJECT_ID_PATTERN.test(v)) throw new Error(`--project-id '${raw}' is not a project id (letters, digits, '-' and '_'): copy it from the project's page or from a previous upload's output`);
+  if (!SPEC_ID_PATTERN.test(v)) {
+    throw new Error(`--spec-id '${raw}' is not a spec id (letters, digits, '-' and '_'): it is the id of the spec in the catalog (Spec Management, or \`nb specs specs list\`)`);
+  }
   return v;
 }
 
@@ -116,9 +104,6 @@ export function checkSuite(kind: SuiteKind, tool: string, format: ReportFormat):
   return name;
 }
 
-/** The same label rule as the API (`utils/apiVersion.ts` in nb-assurance-api): checked here so a typo fails before anything is sent. */
-const API_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
-
 const METRIC_KEY = /^[a-z][a-z0-9_]{0,39}$/;
 const MAX_METRICS = 20;
 
@@ -139,14 +124,6 @@ export function parseMetrics(pairs: string[]): Record<string, number> {
   return out;
 }
 
-export function checkApiVersion(label: string): string {
-  const v = label.trim();
-  if (!API_VERSION_PATTERN.test(v)) {
-    throw new Error(`--api-version / NB_API_VERSION '${label}' is not a version label: use letters, digits, '.', '_' and '-' (up to 32), e.g. v1 or 2026-10`);
-  }
-  return v;
-}
-
 const MAX_FAILURES = 20;
 /** Per-test cases: the API accepts this many (MAX_CASES), each message up to 2000 characters. */
 export const MAX_CASES = 5000;
@@ -157,8 +134,6 @@ const MAX_CASE_MESSAGE_BUDGET = 1_000_000;
 export interface SuitePayload {
   kind: SuiteKind;
   tool: string;
-  /** The components the result is for (names; new ones are created in the project); absent = the component `default`. */
-  components?: string[];
   /** Tells apart results that are otherwise the same (two scans of one tool); absent = none. */
   label?: string;
   /** The version of the tool that produced the report; informational. */
@@ -171,13 +146,13 @@ export interface SuitePayload {
   tests?: { total: number; passed: number; failed: number; skipped?: number };
   duration_ms?: number;
   metrics?: Record<string, number>;
-  /** The API version this result is for (v1, v2); absent = every version. */
-  api_version?: string;
   failures?: { name: string; message?: string }[];
   cases?: { name: string; status: "passed" | "failed" | "skipped"; duration_ms?: number; message?: string }[];
 }
 
 export interface ReportPayload {
+  /** The repository the spec is tied to (required by the API together with the spec in the path). */
+  repository_id: string;
   run: { key: string; commit_sha?: string; branch?: string; ci_url?: string; provider?: RunProvider; repo_url?: string };
   suite: SuitePayload;
 }
@@ -232,8 +207,6 @@ export interface ParseOptions {
   format: ReportFormat;
   kind: SuiteKind;
   tool: string;
-  /** The components the result is for; none = the API's `default`. */
-  components?: string[];
   /** Tells apart results that are otherwise the same. */
   label?: string;
   /** The version of the tool that produced the report. */
@@ -257,7 +230,6 @@ export function parseReport(opts: ParseOptions): ParsedReport {
   const base = {
     kind: opts.kind,
     tool: opts.tool,
-    ...(opts.components && opts.components.length > 0 ? { components: opts.components } : {}),
     ...(opts.label ? { label: opts.label } : {}),
     ...(opts.toolVersion ? { tool_version: opts.toolVersion } : {}),
     ...(opts.specHash ? { spec_hash: opts.specHash } : {}),
@@ -304,175 +276,51 @@ export function parseReport(opts: ParseOptions): ParsedReport {
 interface Connection {
   baseUrl: string;
   token: string | undefined;
-}
-
-/** What the CI says the project is about: an API of the catalog, and which environment of it. */
-export interface SpecLink {
-  id: string;
-  environment?: string;
-}
-
-interface ProjectRef {
-  id: string;
-  created: boolean;
-  /** The repository the project records now (unknown until it was read). */
-  repo?: string | null;
-  /** What the project is linked to now (unknown until it was read). */
-  spec?: { id: string | null; environment: string | null };
-  /** The link was set as the project was created. */
-  specLinked?: boolean;
+  /** Extra request headers (the active organization, when it is not `personal`). */
+  headers?: Record<string, string>;
 }
 
 type Envelope<T> = { success: boolean; data: T };
 
-/** Find the project by name, or create it (unless told not to). Returns its id. */
-export async function ensureProject(
-  conn: Connection,
-  name: string,
-  repo: string | null,
-  create: boolean,
-  spec?: SpecLink,
-): Promise<ProjectRef> {
-  const find = async (): Promise<ProjectRef | null> => {
-    const res = await request({ ...conn, method: "GET", path: "/api/v1/projects", query: { name } });
-    const list = (res.data as Envelope<{ data: { id: string; repo?: string | null; spec_id?: string | null; spec_environment?: string | null }[] }>).data.data;
-    const hit = list[0];
-    return hit ? { id: hit.id, created: false, repo: hit.repo, spec: { id: hit.spec_id ?? null, environment: hit.spec_environment ?? null } } : null;
-  };
-
-  const existing = await find();
-  if (existing) return existing;
-  if (!create) {
-    throw new Error(`No project named '${name}' (create it first, or drop --no-create-project).`);
-  }
-  try {
-    const res = await request({
-      ...conn,
-      method: "POST",
-      path: "/api/v1/projects",
-      // A new project is born linked: nothing to compare, nothing to patch afterwards.
-      body: { name, ...(repo ? { repo } : {}), ...(spec ? { spec_id: spec.id, ...(spec.environment ? { spec_environment: spec.environment } : {}) } : {}) },
-    });
-    return { id: (res.data as Envelope<{ id: string }>).data.id, created: true, repo, spec: spec ? { id: spec.id, environment: spec.environment ?? null } : undefined, specLinked: !!spec };
-  } catch (err) {
-    // Another job of the same pipeline created it between our lookup and our create.
-    if (err instanceof ApiError && err.status === 409) {
-      const raced = await find();
-      if (raced) return raced;
-    }
-    throw err;
-  }
-}
-
 export interface UploadParams {
   conn: Connection;
-  project: string;
-  /** Send to this project by id: no lookup by name, nothing is created. */
-  projectId?: string;
-  repo: string | null;
-  createProject: boolean;
+  /** The spec the result is for: the id of the catalog. */
+  specId: string;
+  /** The payload carries the repository the spec is tied to (`repository_id`). */
   payload: ReportPayload;
-  /** Tie the project to this API of the catalog (set when it differs; a new project is created already linked). */
-  spec?: SpecLink;
-}
-
-/** What the project is linked to after the upload, and whether this upload changed it. */
-export interface SpecResult {
-  id: string;
-  environment: string | null;
-  /** false = it already was this; true = it was set (or changed) now. */
-  changed: boolean;
-  /** What it was linked to before this upload (null = nothing). */
-  was: string | null;
 }
 
 export interface UploadResult {
-  project_id: string;
-  project_created: boolean;
+  spec_id: string;
+  repository_id: string;
   run_id: string;
   suite_id: string;
   replaced: boolean;
-  spec?: SpecResult;
-  /** The repository the project had before this upload, when this upload changed it (the CI's repository wins). */
-  repo_changed_from?: string | null;
-}
-
-/**
- * The repository the CI reports is the project's repository: the latest sender wins, whether the old value was typed in
- * or came from an earlier upload. (To follow another repository, use another project.) Only a difference is written.
- */
-async function syncRepo(conn: Connection, project: ProjectRef, repo: string): Promise<{ changed: boolean; was: string | null }> {
-  let current = project.repo;
-  if (current === undefined) {
-    const res = await request({ ...conn, method: "GET", path: `/api/v1/projects/${encodeURIComponent(project.id)}` });
-    current = (res.data as Envelope<{ repo?: string | null }>).data.repo ?? null;
-  }
-  if (current === repo) return { changed: false, was: current };
-  await request({ ...conn, method: "PATCH", path: `/api/v1/projects/${encodeURIComponent(project.id)}`, body: { repo } });
-  return { changed: true, was: current ?? null };
-}
-
-/**
- * Bring the project's link to the catalog in line with what the CI says. Only what differs is written, so a pipeline that
- * runs on every commit leaves the project untouched once it is linked. Pointing at another spec clears the environment
- * unless one is given too (the API's rule: the old environment belonged to the old spec).
- */
-async function syncSpecLink(conn: Connection, project: ProjectRef, spec: SpecLink): Promise<SpecResult> {
-  const want = spec.environment ?? null;
-  if (project.specLinked) return { id: spec.id, environment: want, changed: true, was: null };
-  let current = project.spec;
-  if (!current) {
-    const res = await request({ ...conn, method: "GET", path: `/api/v1/projects/${encodeURIComponent(project.id)}` });
-    const row = (res.data as Envelope<{ spec_id?: string | null; spec_environment?: string | null }>).data;
-    current = { id: row.spec_id ?? null, environment: row.spec_environment ?? null };
-  }
-  const sameId = current.id === spec.id;
-  const patch: { spec_id?: string; spec_environment?: string } = {};
-  if (!sameId) patch.spec_id = spec.id;
-  if (spec.environment !== undefined && (!sameId || current.environment !== want)) patch.spec_environment = spec.environment;
-  if (Object.keys(patch).length === 0) return { id: spec.id, environment: current.environment, changed: false, was: current.id };
-  await request({ ...conn, method: "PATCH", path: `/api/v1/projects/${encodeURIComponent(project.id)}`, body: patch });
-  return { id: spec.id, environment: spec.environment ?? (sameId ? current.environment : null), changed: true, was: current.id };
 }
 
 export async function uploadReport(p: UploadParams): Promise<UploadResult> {
-  const project: ProjectRef = p.projectId ? { id: p.projectId, created: false } : await ensureProject(p.conn, p.project, p.repo, p.createProject, p.spec);
   let res;
   try {
     res = await request({
       ...p.conn,
       method: "POST",
-      path: `/api/v1/projects/${encodeURIComponent(project.id)}/results`,
+      path: `/api/v1/specs/${encodeURIComponent(p.specId)}/results`,
       body: p.payload,
     });
   } catch (err) {
-    // A pinned id that is not found (or not yours) is a wrong id, not a project to create.
-    if (p.projectId && err instanceof ApiError && err.status === 404) {
-      throw new Error(`No project with id '${p.projectId}' (check --project-id / NB_ASSURANCE_PROJECT_ID, and --env).`);
+    // Assurance answers 404 for an id that is held by another namespace; a typo is the likelier cause.
+    if (err instanceof ApiError && err.status === 404) {
+      throw new Error(`No spec with id '${p.specId}' for this account (check --spec-id / NB_SPEC_ID, --org and --env). The id is the spec's id in the catalog.`);
+    }
+    // The pair of spec and repository is checked by Assurance against the catalog: say what it refused.
+    if (err instanceof ApiError && err.status === 422) {
+      const e = (err.data as { error?: { code?: string; message?: string } } | undefined)?.error;
+      throw new Error(`Assurance refused the result${e?.code ? ` (${e.code})` : ""}: ${e?.message ?? err.message}`);
     }
     throw err;
   }
   const data = (res.data as Envelope<{ run_id: string; suite_id: string; replaced: boolean }>).data;
-  const done: UploadResult = { project_id: project.id, project_created: project.created, ...data };
-  if (p.repo) {
-    try {
-      const synced = await syncRepo(p.conn, project, p.repo);
-      if (synced.changed) done.repo_changed_from = synced.was;
-    } catch (err) {
-      const detail = err instanceof ApiError ? ((err.data as { error?: { message?: string } } | undefined)?.error?.message ?? err.message) : (err as Error).message;
-      throw new Error(`The result was reported, but the project's repository could not be updated: ${detail}`);
-    }
-  }
-  if (p.spec) {
-    // The result is in; a link that fails now leaves it as it is and says so.
-    try {
-      done.spec = await syncSpecLink(p.conn, project, p.spec);
-    } catch (err) {
-      const detail = err instanceof ApiError ? ((err.data as { error?: { message?: string } } | undefined)?.error?.message ?? err.message) : (err as Error).message;
-      throw new Error(`The result was reported, but the project could not be linked to the catalog: ${detail}`);
-    }
-  }
-  return done;
+  return { spec_id: p.specId, repository_id: p.payload.repository_id, ...data };
 }
 
 function fail(message: string): never {
@@ -495,21 +343,20 @@ interface UploadOptions {
   format?: string;
   kind?: string;
   tool?: string;
-  component?: string[];
   label?: string;
   toolVersion?: string;
   specHash?: string;
   contractFile?: string;
   attach?: string;
+  repositoryId?: string;
   specId?: string;
-  specEnvironment?: string;
-  specFile?: string;
-  specName?: string;
-  specGroup?: string;
-  specOrg?: string;
-  project?: string;
-  projectId?: string;
-  repo?: string;
+  repository?: string;
+  component?: string;
+  group?: string;
+  spec?: string;
+  allSpecs?: boolean;
+  repositoryProvider?: string;
+  org?: string;
   repoUrl?: string;
   provider?: string;
   reportPath?: string;
@@ -519,22 +366,20 @@ interface UploadOptions {
   ciUrl?: string;
   status?: string;
   maxFailRatio?: string;
-  createProject: boolean;
   dryRun?: boolean;
   env?: string;
   token?: string;
 }
 
-/** At most this many components per result (the API's limit) and this many characters in a name. */
-const MAX_COMPONENTS = 20;
-const MAX_COMPONENT_LENGTH = 100;
+/** The longest `--label` the API takes. */
+const MAX_LABEL_LENGTH = 100;
 
 /** The `--label`: trimmed, not empty, within the API's limit. */
 function checkLabel(raw: string | undefined): string | undefined {
   if (raw === undefined) return undefined;
   const label = raw.trim();
   if (label === "") fail("--label must not be empty");
-  if (label.length > MAX_COMPONENT_LENGTH) fail(`--label must be ${MAX_COMPONENT_LENGTH} characters or fewer`);
+  if (label.length > MAX_LABEL_LENGTH) fail(`--label must be ${MAX_LABEL_LENGTH} characters or fewer`);
   return label;
 }
 
@@ -562,20 +407,6 @@ function hashOfContractFile(file: string): string {
   } catch (err) {
     return fail(String((err as Error).message).replace(/^--file:/, "--contract-file:"));
   }
-}
-
-/** The `--component` names: trimmed, no empty one, no two alike ignoring case, within the API's limits. */
-function checkComponents(raw: string[] | undefined): string[] | undefined {
-  if (raw === undefined) return undefined;
-  const out: string[] = [];
-  for (const value of raw) {
-    const name = value.trim();
-    if (name === "") fail("--component must not be empty");
-    if (name.length > MAX_COMPONENT_LENGTH) fail(`--component must be ${MAX_COMPONENT_LENGTH} characters or fewer: ${name.slice(0, 20)}…`);
-    if (!out.some((o) => o.toLowerCase() === name.toLowerCase())) out.push(name);
-  }
-  if (out.length > MAX_COMPONENTS) fail(`At most ${MAX_COMPONENTS} --component values`);
-  return out;
 }
 
 function resolveFormat(opts: UploadOptions, file: string): ReportFormat {
@@ -607,12 +438,12 @@ export function prepareAttachment(path: string, limit: number = MAX_ATTACHMENT_B
 }
 
 /** Keep the original report with a result that was just reported. A failure here leaves the result as it is. */
-export async function uploadAttachment(conn: Connection, ids: { project_id: string; run_id: string; suite_id: string }, a: Attachment): Promise<void> {
+export async function uploadAttachment(conn: Connection, ids: { spec_id: string; run_id: string; suite_id: string }, a: Attachment): Promise<void> {
   try {
     await request({
       ...conn,
       method: "PUT",
-      path: `/api/v1/projects/${encodeURIComponent(ids.project_id)}/runs/${encodeURIComponent(ids.run_id)}/suites/${encodeURIComponent(ids.suite_id)}/attachment`,
+      path: `/api/v1/specs/${encodeURIComponent(ids.spec_id)}/runs/${encodeURIComponent(ids.run_id)}/suites/${encodeURIComponent(ids.suite_id)}/attachment`,
       query: { name: a.name },
       rawBody: a.bytes,
       contentType: a.name.endsWith(".zip") ? "application/zip" : "application/octet-stream",
@@ -623,32 +454,50 @@ export async function uploadAttachment(conn: Connection, ids: { project_id: stri
   }
 }
 
+/**
+ * The spec a command is about, from its options: `--spec-id` (default $NB_SPEC_ID) OR `--repository` [`--component`] `--spec`
+ * (a name asked for on the command line wins over the id the pipeline's variable carries). The retired `NB_REPOSITORY_ID` /
+ * `--repository-id` are refused with the way to the new ones, for this release.
+ */
+export function specRefOf(opts: { repositoryId?: string; specId?: string; repository?: string; component?: string; group?: string; apiVersion?: string; spec?: string; repositoryProvider?: string }, env: NodeJS.ProcessEnv = process.env): SpecRef {
+  if (opts.repositoryId !== undefined) fail("--repository-id is retired: a result is reported to a SPEC now. Use --spec-id <id> (or $NB_SPEC_ID), or --repository <owner/name> [--component <name>] [--group <name>] --spec <name>");
+  const byNames = [opts.repository, opts.spec, opts.component, opts.group, opts.apiVersion].some((v) => v !== undefined && v.trim() !== "");
+  if (opts.specId !== undefined && byNames) fail("--spec-id names the spec by itself: do not combine it with --repository, --component, --group, --api-version or --spec");
+  if (opts.repositoryProvider !== undefined && !opts.repository) fail("--repository-provider needs --repository");
+  if (byNames) return { repository: opts.repository, component: opts.component, group: opts.group, apiVersion: opts.apiVersion, spec: opts.spec, provider: opts.repositoryProvider };
+  const specId = checkSpecId(opts.specId ?? env.NB_SPEC_ID);
+  if (specId) return { specId };
+  if (env.NB_REPOSITORY_ID?.trim()) {
+    fail("NB_REPOSITORY_ID is retired: a result is now reported to a SPEC. Set NB_SPEC_ID (the spec's id in the catalog), or pass --repository <owner/name> [--component <name>] --spec <name>");
+  }
+  return fail("Say which spec: --spec-id <id> (or set NB_SPEC_ID), or --repository <owner/name> [--component <name>] [--group <name>] [--api-version <v>] --spec <name>. The spec must be tied to a repository (Spec Management on the screen, or `nb specs specs push`)");
+}
+
 export function buildReportUploadCommand(): Command {
   return new Command("upload")
-    .description("Report a test result file (JUnit XML or Locust CSV) to an Assurance project")
+    .description("Report a test result file (JUnit XML or Locust CSV) to an Assurance spec: by its id (--spec-id, or $NB_SPEC_ID), or by names (--repository, optional --component and --group, --spec, and --api-version when the name exists at several API versions). The spec must be tied to a repository; nothing is registered by a report")
     .option("--file <path>", "the report file (JUnit XML, or Locust *_stats.csv)")
     .option("--dir <dir>", "a Locust output directory (uses its *_stats.csv)")
     .option("--coverage-report <path>", "specmatic: its report (the HTML or a JSON copy); adds the API coverage as the coverage_pct metric")
     .option("--format <format>", "junit | locust (default: from the file name)")
     .option("--kind <kind>", `what the suite proves: ${SUITE_KINDS.join(" | ")} (locust: load)`)
     .option("--tool <label>", "the producing tool, a free label, e.g. vitest, pytest, playwright, specmatic, zap, trivy (locust: locust)")
-    .option("--component <name>", "a component the result is for (e.g. frontend, backend), repeatable when it covers several (e.g. an end-to-end test: --component frontend --component backend); new names are created in the project; leave it out for the component `default`", (v: string, all: string[] = []) => [...all, v])
-    .option("--label <name>", "tells apart results that are otherwise the same, such as two scans of one tool on the same components (e.g. --label baseline, --label full-scan); part of the result's identity, so the same label again replaces the result; optional")
+    .option("--label <name>", "tells apart results that are otherwise the same, such as two scans of one tool of the same spec (e.g. --label baseline, --label full-scan); part of the result's identity, so the same label again replaces the result; optional")
     .option("--tool-version <version>", "the version of the tool that produced the report (e.g. 9.1.0): informational, shown next to the tool, handy when a tool's new version changes its layout; optional")
     .option("--spec-hash <sha256>", "the SHA-256 of the API contract this result was produced against (64 hex characters; the sha256 `nb specs versions` prints for a catalog version): Evolution compares it with the catalog's versions and tells whether the result was produced with the current contract, an older one or an unknown one. Informational, not part of the result's identity; a report sent again replaces it. Exclusive with --contract-file")
     .option("--contract-file <path>", "the contract document the result was produced against (e.g. node_modules/@nasebanal/api-specs-<api>/spec.yaml): its SHA-256 is sent as --spec-hash would, the same hash the catalog keeps for that document. Exclusive with --spec-hash")
     .option("--metric <key=value>", "an extra number for the suite, repeatable (e.g. --metric high=0 --metric medium=3; for security: critical, high, medium, low, info)", (v: string, all: string[] = []) => [...all, v])
-    .option("--api-version <label>", "the API version the result is for (e.g. v1, v2), part of the result's identity next to its kind and components; leave it out for results that hold for every version, such as unit tests. Default: the NB_API_VERSION environment variable (set it once per CI job or branch). A project can require a version for some kinds of result, and then refuses one without it")
-    .option("--project <name>", "project name (CI: the repository); found, or created if missing")
+    .option("--api-version <v>", "by names: the API version (v1, v2) of the spec, part of the spec's key (a new major API version is a new spec). It selects the spec; a result has no API version of its own. Left out, it is the API version of the one spec the rest of the key matches (several: the error lists them). With --all-specs: only the specs at this API version get the result (a release branch feeds its own API version)")
     .option("--attach <path>", "keep the tool's own report with the result: a file as it is, or a folder as a zip (up to 20 MiB). The server only stores it and offers it for download; nothing opens it. Nothing is attached unless you pass this, so check the report holds no secrets")
-    .option("--spec-id <id>", "tie the project to this API of the catalog (the spec's id in Assurance / Specs): set when it differs, so a pipeline that runs on every commit leaves it alone once it is linked. A new project is created already linked. The id is not looked up here")
-    .option("--spec-file <path>", "register this OpenAPI file in the API catalog first (a new spec, or a new version when its content changed; nothing is uploaded when it is already the latest) and tie the project to it: the whole chain in one command. Needs the catalog (Evolution) access of the account. Exclusive with --spec-id")
-    .option("--spec-name <name>", "with --spec-file: the spec's name in the catalog (default: the document's info.title)")
-    .option("--spec-group <name>", "with --spec-file: file a NEW spec in this group (made when missing); default none. An existing spec is never moved")
-    .option("--spec-org <id>", "with --spec-file: the organization whose catalog it is (an id), or 'personal' (default; or $NB_SPECS_ORG)")
-    .option("--spec-environment <name>", "which environment of that API the project covers (production, staging, ...); needs --spec-id")
-    .option("--project-id <id>", "send to this project by id (or $NB_ASSURANCE_PROJECT_ID): no lookup by name and nothing is created, so a rename never moves the results; recommended for a pipeline once the project exists")
-    .option("--repo <repo>", "repository recorded on the project; the latest sender wins (CI: detected)")
+    .option("--spec-id <id>", "the spec to report to, by its id in the catalog (default: $NB_SPEC_ID). Keep the id in the pipeline's variable: a rename of the spec or its repository never moves the results. Exclusive with --repository / --component / --spec")
+    .option("--repository <owner/name>", "by names: the repository the spec is tied to (owner/name for a git host). Needs --spec; --component is optional (none = the repository as a whole). The three are checked against each other: the spec must be tied to exactly that repository row. Nothing is created")
+    .option("--component <name>", "by names: the component part of the repository's key (the owner's own name for a part of it, e.g. account-api, web); optional, none = the repository as a whole")
+    .option("--group <name>", "by names: the group the spec is filed in (an environment, say: the same spec name may exist in several groups); optional, none = the specs in no group (not any group). On a miss the error lists where the name is")
+    .option("--spec <name>", "by names: the spec's name in the catalog. Needs --repository")
+    .option("--all-specs", "by names, instead of --spec: send the result to EVERY spec tied to that repository row at one API version, whatever its group (a result that belongs to the source, not to an environment: --kind unit or security). A repository row with specs of several API versions needs --api-version (a release branch feeds its own API version only). One line per spec")
+    .addOption(new Option("--repository-id <id>", "retired: use --spec-id").hideHelp())
+    .option("--repository-provider <provider>", "with --repository: github | gitlab | bitbucket | other (default: github)")
+    .option("--org <id>", "the organization whose specs these are (an id), or 'personal' (default; or $NB_SPECS_ORG): sent to the catalog and to Assurance as X-Active-Organization-Id")
     .option("--repo-url <url>", "the repository's web address on its host, e.g. https://gitlab.example.com/group/app (CI: detected); lets Evolution link to the report on a self-hosted GitLab / GitHub Enterprise")
     .option("--provider <provider>", `the CI provider: ${RUN_PROVIDERS.join(" | ")} (CI: detected)`)
     .option("--report-path <path>", "the report file's path in the repository, relative to its root (default: detected, and only for a file committed at the reported commit)")
@@ -658,7 +507,6 @@ export function buildReportUploadCommand(): Command {
     .option("--ci-url <url>", "link to the CI run (CI: detected)")
     .option("--status <status>", "passed | failed; default is derived from the report")
     .option("--max-fail-ratio <ratio>", "locust: allowed failure ratio 0..1 (default: $LOCUST_MAX_FAIL_RATIO or 0)")
-    .option("--no-create-project", "fail instead of creating the project when it does not exist")
     .option("--dry-run", "print what would be sent and exit without calling the API")
     .action(async (_flags: unknown, command: Command) => {
       const opts = command.optsWithGlobals() as UploadOptions;
@@ -678,15 +526,15 @@ export function buildReportUploadCommand(): Command {
       const maxFailRatio = Number(ratioRaw);
       if (!Number.isFinite(maxFailRatio) || maxFailRatio < 0 || maxFailRatio > 1) fail("--max-fail-ratio must be a number between 0 and 1");
 
-      // The flag wins; NB_API_VERSION (a CI variable) is the default, and an empty one (a CI that declares it but does not set it) is none.
-      const versionRaw = opts.apiVersion ?? (process.env.NB_API_VERSION || undefined);
-      const apiVersion = versionRaw === undefined ? undefined : checkApiVersion(versionRaw);
+      // NB_API_VERSION retired with the result's own api_version: the API version is the spec's now. A CI that still sets it keeps working.
+      if (process.env.NB_API_VERSION?.trim()) {
+        process.stderr.write("! NB_API_VERSION is retired and ignored: a result has no API version of its own, it belongs to the spec it is reported to (a new major API version is a new spec). Use --api-version <v> only to SELECT a spec by names\n");
+      }
       if (opts.specHash !== undefined && opts.contractFile !== undefined) fail("--spec-hash and --contract-file are exclusive: one gives the hash, the other a file to take it from");
       const parsed = parseReport({
         format,
         kind,
         tool: checkedTool,
-        components: checkComponents(opts.component),
         label: checkLabel(opts.label),
         toolVersion: checkToolVersion(opts.toolVersion),
         specHash: opts.contractFile !== undefined ? hashOfContractFile(opts.contractFile) : checkSpecHash(opts.specHash),
@@ -703,7 +551,6 @@ export function buildReportUploadCommand(): Command {
         parsed.note += `, API coverage ${cov.coverage_pct}% (${cov.covered}/${cov.total} operations)`;
       }
 
-      if (apiVersion !== undefined) parsed.suite.api_version = apiVersion;
       if (opts.metric !== undefined && opts.metric.length > 0) {
         const extra = parseMetrics(opts.metric);
         const merged = { ...parsed.suite.metrics, ...extra };
@@ -715,19 +562,15 @@ export function buildReportUploadCommand(): Command {
       const ci: CiInfo = detectCi(process.env);
       const runKey = opts.runKey ?? ci.runKey ?? fail("Cannot determine the run key; pass --run-key");
       const attachment = opts.attach !== undefined ? prepareAttachment(opts.attach) : undefined;
-      if (opts.specId !== undefined && opts.specFile !== undefined) fail("--spec-id and --spec-file are exclusive: one names a spec of the catalog, the other registers a file");
-      if (opts.specEnvironment !== undefined && opts.specId === undefined && opts.specFile === undefined) fail("--spec-environment needs --spec-id or --spec-file");
-      for (const [flag, value] of [["--spec-name", opts.specName], ["--spec-group", opts.specGroup], ["--spec-org", opts.specOrg]] as const) {
-        if (value !== undefined && opts.specFile === undefined) fail(`${flag} needs --spec-file`);
+      // Which spec the result is for is settled before anything is sent: an id, or names the catalog turns into one (or, with
+      // --all-specs, every spec of one repository row: only for results that belong to the source).
+      if (opts.allSpecs) {
+        if (!opts.repository) fail("--all-specs needs --repository <owner/name> [--component <name>]: the specs tied to that repository row get the result");
+        if (opts.spec !== undefined || opts.specId !== undefined || opts.group !== undefined) fail("--all-specs sends the result to every spec of that repository at one API version: do not combine it with --spec-id, --spec or --group");
+        if (kind !== "unit" && kind !== "security") fail(`--all-specs is for results that belong to the source (--kind unit or security), not --kind ${kind}: a ${kind} result is about one deployed environment, so name its spec (--spec-id, or --spec with --group)`);
       }
-      const specEnvironment = opts.specEnvironment !== undefined ? checkSpecEnvironment(opts.specEnvironment) : undefined;
-      let spec: SpecLink | undefined = opts.specId !== undefined ? { id: checkSpecId(opts.specId), ...(specEnvironment !== undefined ? { environment: specEnvironment } : {}) } : undefined;
-      // The file is read and its name settled before anything is sent, so a bad path fails the command while nothing has happened yet.
-      const specText = opts.specFile !== undefined ? readSpecFile(opts.specFile) : undefined;
-      const specOrg = opts.specFile !== undefined ? checkOrg(opts.specOrg ?? process.env.NB_SPECS_ORG) : undefined;
-      const projectId = checkProjectId(opts.projectId ?? process.env.NB_ASSURANCE_PROJECT_ID);
-      const project = opts.project ?? ci.project ?? projectId ?? fail("Cannot determine the project name; pass --project <name> or --project-id <id>");
-      if (projectId && opts.project) process.stderr.write("--project is ignored: --project-id decides where the result goes\n");
+      const ref: SpecRef = opts.allSpecs ? { repository: opts.repository, component: opts.component, apiVersion: opts.apiVersion, provider: opts.repositoryProvider } : specRefOf(opts);
+      const org = checkOrg(opts.org ?? process.env.NB_SPECS_ORG);
       const commit = opts.commit ?? ci.commitSha;
       const branch = opts.branch ?? ci.branch;
       const ciUrl = opts.ciUrl ?? ci.ciUrl;
@@ -736,7 +579,8 @@ export function buildReportUploadCommand(): Command {
       const reportPath = opts.reportPath !== undefined ? checkReportPath(opts.reportPath) : readReportPath(file, commit);
       if (reportPath) parsed.suite.report_path = reportPath;
 
-      const payload: ReportPayload = {
+      const buildPayload = (repositoryId: string): ReportPayload => ({
+        repository_id: repositoryId,
         run: {
           key: runKey,
           ...(commit ? { commit_sha: commit } : {}),
@@ -746,67 +590,50 @@ export function buildReportUploadCommand(): Command {
           ...(repoUrl ? { repo_url: repoUrl } : {}),
         },
         suite: parsed.suite,
-      };
-      const repo = opts.repo ?? ci.repo;
-
+      });
+      const env = (opts.env as Environment | undefined) || resolveEnv();
+      const specsConn = { baseUrl: specsBaseUrl(env), token: opts.token || (await resolveAccessToken()), org };
+      const attachmentNote = attachment ? { attachment: { name: attachment.name, size_bytes: attachment.bytes.length } } : {};
       if (opts.dryRun) {
-        printJson({ project, ...(projectId ? { project_id: projectId } : {}), repo, payload, ...(spec ? { spec } : {}), ...(specText !== undefined && opts.specFile !== undefined ? { spec_file: { file: opts.specFile, name: specNameFor(specText, opts.specFile, opts.specName), content_hash: hashText(specText), ...(opts.specGroup ? { group: opts.specGroup } : {}) } } : {}), ...(attachment ? { attachment: { name: attachment.name, size_bytes: attachment.bytes.length } } : {}) });
+        // Nothing is written. By names the catalog is only read (to say which spec and repository they mean); by id nothing is called.
+        if (opts.allSpecs) {
+          const hits = await resolveRepositorySpecs(specsConn, ref);
+          printJson({ specs: hits.map((h) => ({ id: h.spec_id, name: h.spec_name })), repository: hits[0].repository, payload: buildPayload(hits[0].repository_id), ...attachmentNote });
+        } else if (ref.specId !== undefined) {
+          printJson({ spec_id: ref.specId, repository_id: "(from the catalog when sent)", payload: buildPayload("(from the catalog when sent)"), ...attachmentNote });
+        } else {
+          const hit = await resolveSpec(specsConn, ref);
+          printJson({ spec: { id: hit.spec_id, name: hit.spec_name }, repository: hit.repository, payload: buildPayload(hit.repository_id), ...attachmentNote });
+        }
         process.stderr.write(`(dry run) ${basename(dirname(file)) || "."}/${basename(file)}: ${parsed.note}\n`);
         return;
       }
 
-      const env = (opts.env as Environment | undefined) || resolveEnv();
       const override = process.env.NB_BASE_URL?.replace(/\/$/, "");
       const baseUrl = override ?? resolveBaseUrl(loadSpec("assurance.yaml").servers, env);
-      const token = opts.token || (await resolveAccessToken());
 
-      // The catalog comes first: the project is tied to the spec it returns. It must not cost the result: a failure here is
-      // kept, the result is reported without the link, and the command says so at the end.
-      let pushed: PushResult | undefined;
-      let specError: Error | undefined;
-      if (opts.specFile !== undefined && specOrg !== undefined) {
-        try {
-          pushed = await pushSpec({
-            conn: { baseUrl: specsBaseUrl(env), token, org: specOrg },
-            file: opts.specFile,
-            name: opts.specName,
-            group: opts.specGroup,
-            note: ciNote(ci, commit),
-          });
-          spec = { id: pushed.id, ...(specEnvironment !== undefined ? { environment: specEnvironment } : {}) };
-        } catch (err) {
-          specError = err as Error;
-        }
-      }
-
-      const result = await uploadReport({
-        conn: { baseUrl, token },
-        project,
-        projectId,
-        repo,
-        createProject: opts.createProject,
-        payload,
-        spec,
-      });
-      if (attachment) await uploadAttachment({ baseUrl, token }, result, attachment);
-      printJson({ ...result, ...(attachment ? { attachment: { name: attachment.name, size_bytes: attachment.bytes.length } } : {}), ...(pushed ? { catalog: pushed } : {}) });
-      exportGithubOutput("project_id", result.project_id);
-      if (pushed) exportGithubOutput("spec_id", pushed.id);
-      process.stderr.write(
-        `✓ ${kind}/${checkedTool} ${payload.suite.status}: ${parsed.note} -> project '${project}' (id ${result.project_id})` +
-          `${result.project_created ? " (created)" : ""}, run '${runKey}'${result.replaced ? " (replaced)" : ""}` +
-          `${attachment ? `, attached ${attachment.name} (${(attachment.bytes.length / 1024).toFixed(0)} KiB)` : ""}` +
-          `${pushed ? `, spec ${pushed.name} v${pushed.version} (${pushed.action.replace("_", " ")})` : ""}` +
-          `${result.spec ? `, catalog ${result.spec.id}${result.spec.environment ? ` (${result.spec.environment})` : ""} ${result.spec.changed ? (result.spec.was ? `(changed from ${result.spec.was})` : "(linked)") : "(already linked)"}` : ""}\n`,
-      );
-      if (result.repo_changed_from !== undefined) {
-        process.stderr.write(`  Repository of the project set to ${repo} (was ${result.repo_changed_from ?? "not set"}); the latest sender wins\n`);
-      }
-      if (!projectId) {
+      // Assurance and the catalog act for the same owner: the organization goes to both (personal is the default and sent as is).
+      const orgHeaders = org === "personal" ? undefined : { "X-Active-Organization-Id": org };
+      const hits: ResolvedSpec[] = opts.allSpecs ? await resolveRepositorySpecs(specsConn, ref) : [await resolveSpec(specsConn, ref)];
+      const conn = { baseUrl, token: specsConn.token, ...(orgHeaders ? { headers: orgHeaders } : {}) };
+      const results: UploadResult[] = [];
+      for (const hit of hits) {
+        const label = `${hit.spec_name} (${hit.repository.provider} ${hit.repository.name}${hit.repository.component ? ` / ${hit.repository.component}` : ""}), id ${hit.spec_id}`;
+        const result = await uploadReport({ conn, specId: hit.spec_id, payload: buildPayload(hit.repository_id) });
+        if (attachment) await uploadAttachment(conn, result, attachment);
+        results.push(result);
         process.stderr.write(
-          `  Pin it so a rename or a typo cannot send results elsewhere: --project-id ${result.project_id} (or NB_ASSURANCE_PROJECT_ID=${result.project_id})\n`,
+          `✓ ${kind}/${checkedTool} ${parsed.suite.status}: ${parsed.note} -> spec ${label}, run '${runKey}'${result.replaced ? " (replaced)" : ""}` +
+            `${attachment ? `, attached ${attachment.name} (${(attachment.bytes.length / 1024).toFixed(0)} KiB)` : ""}\n`,
         );
       }
-      if (specError) throw new Error(`The result was reported, but the spec could not be registered in the catalog (the project is not tied to it): ${specError.message}`);
+      if (opts.allSpecs) {
+        printJson({ results, ...attachmentNote });
+        exportGithubOutput("spec_ids", results.map((x) => x.spec_id).join(","));
+      } else {
+        printJson({ ...results[0], ...attachmentNote });
+        exportGithubOutput("spec_id", results[0].spec_id);
+      }
+      exportGithubOutput("repository_id", results[0].repository_id);
     });
 }

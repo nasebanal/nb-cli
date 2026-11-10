@@ -29,8 +29,9 @@ $ nb account me tokens create --data '{"name":"ci"}'
 
 `nb assurance report upload` reads a test report on the runner, reduces it to a
 small summary (counts, coverage-free metrics, the first failures, and for JUnit
-the per-test cases) and reports it to a NASEBANAL Assurance project. The same line works in a pipeline and on a
-laptop; in CI it needs only a token:
+the per-test cases) and reports it to a NASEBANAL Assurance **spec**: an API spec of the catalog that is tied to a repository
+(see "Which spec a result or a monitor is about" below). The same line works in a pipeline and on a laptop; in CI it needs a
+token and the spec's id:
 
 The **kind** is one of a fixed set of perspectives (`unit`, `e2e`, `contract`,
 `security`, `load`); the **tool** is a free label (`vitest`, `pytest`, `playwright`,
@@ -42,41 +43,48 @@ numbers with `--metric` (for a scanner: `critical`, `high`, `medium`, `low`, `in
 
 ```bash
 export NB_TOKEN=nbpat_…        # a PAT or service-account token (no browser needed)
+export NB_SPEC_ID=…            # the spec's id in the catalog (Spec Management, or `nb specs specs list`; a CI variable)
 
 # JUnit XML: vitest (--reporter=junit), pytest (--junitxml), Specmatic, Playwright (--reporter=junit)
 nb assurance report upload --file report/junit.xml --kind unit --tool pytest
-nb assurance report upload --file results/junit.xml --kind e2e --tool playwright --component web
+nb assurance report upload --file results/junit.xml --kind e2e --tool playwright
 
-# Two scans of one tool on the same components (ZAP's baseline and full scan): a label tells them apart
-nb assurance report upload --file report/baseline-junit.xml --kind security --tool zap --component frontend --label baseline
-nb assurance report upload --file report/full-scan-junit.xml --kind security --tool zap --component frontend --label full-scan
+# By names instead of the id (all checked against the catalog; --component is optional: none = the repository as a whole;
+# --group is optional too: none = the specs in no group, an environment is a group)
+nb assurance report upload --file results/junit.xml --kind e2e --tool playwright \
+  --repository nasebanal/nb-account-api --component account-internal --group Staging --spec "Account API (internal)"
+
+# A result that belongs to the source, not to an environment (unit tests, a security scan), goes to EVERY spec of the repository
+# at ONE API version (one per environment), one line each; refused for the other kinds. A repository row whose specs are all at one
+# API version needs no --api-version; with several (v1 and v2 side by side) it is required: a release branch feeds its own version only
+nb assurance report upload --file report/junit.xml --kind unit --tool vitest --repository nasebanal/nb-account-api --all-specs --api-version v1
+
+# Two scans of one tool of the same spec (ZAP's baseline and full scan): a label tells them apart
+nb assurance report upload --file report/baseline-junit.xml --kind security --tool zap --label baseline
+nb assurance report upload --file report/full-scan-junit.xml --kind security --tool zap --label full-scan
 
 # The tool's own version is informational and optional
 nb assurance report upload --file report/junit.xml --kind unit --tool pytest --tool-version 9.1.0
-
-# A result may be about several components: repeat the flag (new names are created in the project; none = `default`)
-nb assurance report upload --file results/junit.xml --kind e2e --tool playwright --component frontend --component backend
 
 # Specmatic: the JUnit XML, plus its HTML report for the API coverage (coverage_pct = operations exercised / operations in the spec)
 nb assurance report upload --file specmatic/junit/TEST-junit-jupiter.xml --kind contract --tool specmatic \
   --coverage-report specmatic/report/test/html/index.html
 
-# One repository, several API versions: label the result (the version is part of the suite's identity, so v1 and v2 of the same name sit side by side)
-nb assurance report upload --file specmatic/v2/junit.xml --kind contract --tool specmatic --api-version v2
-# unit tests hold for every version: leave --api-version out
-# set NB_API_VERSION once (a CI variable per job or branch) instead of repeating the flag; the flag wins, an empty variable means none
-NB_API_VERSION=v2 nb assurance report upload --file specmatic/v2/junit.xml --kind contract --tool specmatic
-# a project may require a version for some kinds of result (Assurance > Projects > the project's settings): a result of such a kind
-# without one is refused with 422 API_VERSION_REQUIRED (the message says to pass --api-version or set NB_API_VERSION)
+# An API at several API versions (v1 and v2 side by side) is one SPEC per API version, so a result needs no version of its own: it
+# goes to the spec it belongs to. By names, --api-version is part of the spec's KEY (it selects the spec; it is not a label of the result)
+nb assurance report upload --file specmatic/v2/junit.xml --kind contract --tool specmatic \
+  --repository nasebanal/nb-account-api --spec "Account API" --api-version v2
+# NB_API_VERSION and the result's own api_version are retired (the variable is ignored with a warning); the API versions a result
+# must name (the spec's "How results are handled") are gone with them
 
-# Which contract the result was produced against: the SHA-256 of the contract document (the catalog's content_hash; `nb specs versions`
-# prints it), so Evolution can tell a result of the current contract from one of an older or an unknown version. Not the API's URL version
-# (--api-version) and not the document's info.version (edited by hand): a hash. Informational, not part of the result's identity.
+# Which contract the result was produced against: the SHA-256 of the contract document (the catalog's content_hash; `nb specs specs versions list`
+# prints it), so Evolution can tell a result of the current revision from one of an older or an unknown one. Not the API version
+# (v1, v2: the spec's) and not the document's info.version (edited by hand): a hash. Informational, not part of the result's identity.
 nb assurance report upload --file specmatic/junit.xml --kind contract --tool specmatic --spec-hash 9f2c...64 hex characters
-# or let the CLI hash the file the test ran against (a pinned package's spec.yaml hashes to what `nb specs push` of it registered)
+# or let the CLI hash the file the test ran against (a pinned package's spec.yaml hashes to what `nb specs specs push` of it registered)
 nb assurance report upload --file specmatic/junit.xml --kind contract --tool specmatic \
   --contract-file node_modules/@nasebanal/api-specs-assurance/spec.yaml
-# needs an Assurance that knows spec_hash (the assurance contract 1.10.0 and later); an older one ignores the field
+# Evolution matches the hash against the revisions of this spec
 
 # Extra numbers for the suite (repeatable), e.g. ZAP's findings by severity - what the Assurance security gate reads
 nb assurance report upload --file zap/report/baseline-junit.xml --kind security --tool zap --metric high=0 --metric medium=3 --metric low=2
@@ -85,16 +93,26 @@ nb assurance report upload --file zap/report/baseline-junit.xml --kind security 
 nb assurance report upload --dir locust/logs/20261001_090000
 ```
 
-- **Project:** found by name, created when missing (`--no-create-project` to fail
-  instead). In CI the name defaults to the repository (`GITHUB_REPOSITORY` /
-  `CI_PROJECT_PATH`); elsewhere pass `--project`. That is the zero-configuration
-  start; once the project exists, **pin it by id** (`--project-id <id>` or
-  `NB_ASSURANCE_PROJECT_ID`): the upload then goes straight to that project, nothing
-  is looked up by name or created, so renaming the project, a typo, or a renamed
-  repository can no longer send results elsewhere. An unknown id is an error, never a
-  new project. The id is printed after every upload (and, in GitHub Actions, written
-  to `$GITHUB_OUTPUT` as `project_id`). Keep one id per environment (`--env`), and
-  take care when copying a workflow to another repository: its id goes with it.
+- **Spec (the target of a report):** a result is reported to a **spec of the catalog that is tied to a
+  repository**, by its id, `--spec-id <id>` or `$NB_SPEC_ID` (a pipeline's repository variable; it is not
+  a secret, and it is not a file in the repository: a copy of a workflow keeps its own variable, so it
+  cannot report into another API by accident), or by names, `--repository <owner/name> [--component <name>] [--group <name>] [--api-version <v>] --spec <name>`
+  (+ `--repository-provider`, default `github`; no `--component` = the repository as a whole; no `--group` = the specs
+  in no group, **not** any group; no `--api-version` = the API version of the one spec the rest of the key leaves, several
+  are an error that lists them), which are checked against each other (the spec must be tied to exactly that group,
+  repository row and API version; on a miss the error lists where the name does exist). `--all-specs` (with `--repository`
+  [`--api-version`], instead of `--spec`) sends a `unit` or `security` result to every spec tied to that repository row at that API
+  version. A name asked for wins over the variable; an id and
+  names together are refused; with none the command stops before sending anything and says how. **Nothing is created:** a
+  spec or a repository that the catalog does not have is an error that points at `nb specs`, and a spec tied to no
+  repository is refused (the request carries the spec in the path and its `repository_id` in the body, and Assurance
+  checks the pair with the catalog: `422 SPEC_WITHOUT_REPOSITORY` / `REPOSITORY_MISMATCH`). The ids are printed after
+  every upload (and, in GitHub Actions, written to `$GITHUB_OUTPUT` as `spec_id` and `repository_id`). `--org <id|personal>`
+  (or `$NB_SPECS_ORG`) says whose specs these are; it is sent to the catalog and, for an organization, to Assurance.
+  Keep one id per environment (`--env`). **What this replaces:** `--repository-id` / `NB_REPOSITORY_ID` (a clear error says
+  so for this release), the old `--component` of a result (the component is now part of the repository's key), `--project`,
+  `--project-id`, `--no-create-project`, `--spec-environment` and `--spec-file` are gone: Assurance creates and links
+  nothing, the spec and its repository belong to the catalog, and registering them is its own step (`nb specs`).
 - **Link to the report in the repository:** the CLI also sends the CI `--provider`
   (`github` | `gitlab` | `other`, detected) and, when the report file is **committed**
   (tracked, unchanged since `HEAD`, and `HEAD` is the reported commit), its path
@@ -103,24 +121,7 @@ nb assurance report upload --dir locust/logs/20261001_090000
   override with `--report-path`.
   The repository's web address is sent too (`repo_url`, detected from `GITHUB_SERVER_URL` /
   `CI_PROJECT_URL`; override with `--repo-url`), so the link also works on a self-hosted
-  GitLab or GitHub Enterprise. The CI's repository also replaces the project's `repo`
-  (the latest sender wins).
-- **Tie the project to its API in the catalog (`--spec-id`, `--spec-environment`):**
-  `--spec-id <id>` links the project to a spec of the API catalog (its id in Assurance /
-  Specs), `--spec-environment production` says which environment of it the project covers
-  (needs `--spec-id`). A new project is created already linked; an existing one is
-  changed **only when it differs**, so a pipeline that runs on every commit writes nothing
-  once the link is right. Pointing it at another spec clears the old environment unless one
-  is given too. The id is not looked up in the catalog (it is another service): a typo shows
-  as "no spec" on the project. The link is set after the result is in, so a failure there
-  leaves the result reported and says so. `--spec-file <openapi.yaml>` does the whole chain in one command (see below).
-- **Register the spec file and tie the project to it in one command (`--spec-file`):**
-  `nb assurance report upload ... --spec-file openapi.yaml [--spec-name N] [--spec-group G]
-  [--spec-org ID] [--spec-environment production]` first runs `nb specs push` on the file,
-  then creates / links the project to the spec it returns, then reports the result. The
-  catalog's answer never costs the result: if registering the spec fails (a plan without the
-  catalog, the limit of specs), the result is still reported, without the link, and the command
-  ends with the reason and a non-zero exit. Exclusive with `--spec-id`.
+  GitLab or GitHub Enterprise.
 - **Run:** every job of one pipeline run shares a run key (CI: `GITHUB_RUN_ID` +
   attempt, `CI_PIPELINE_ID`; locally `local-<sha>-<day>`), so a unit job and an e2e
   job land in the same run, and re-running a job replaces its own result.
@@ -131,12 +132,12 @@ nb assurance report upload --dir locust/logs/20261001_090000
   report, Specmatic's report, a JUnit file with everything in it). `--attach` sends the
   original with the result: a file as it is, a folder as a zip made by the CLI (regular
   files only, symbolic links are never followed). Up to 20 MiB per result and 200 MiB per
-  project; the CLI checks the size before anything is sent. It is **opt-in twice** - nothing is
+  repository; the CLI checks the size before anything is sent. It is **opt-in twice** - nothing is
   attached unless you pass it, and the server refuses it (403 `ATTACHMENTS_DISABLED`) until
-  the project has turned on "Attaching original reports" in its settings in Assurance (off by
+  the spec has turned on "Attaching original reports" in its settings (off by
   default). Make sure the report holds no secrets or personal data.
   The server only stores it (next to the result's cases, deleted with the result and by
-  the project's retention) and offers it as a **download** to the project's members in
+  the repository's retention) and offers it as a **download** to the repository's members in
   Assurance; it is never opened, unzipped or shown in the browser. A failed attachment
   leaves the result reported and the command exits non-zero with the reason.
 - **Pass / fail:** JUnit - any failed or errored test fails the suite. Locust - an
@@ -150,11 +151,130 @@ nb assurance report upload --dir locust/logs/20261001_090000
   is sent in total (names and outcomes always stay). Locust reports have no cases.
 - `--dry-run` prints what would be sent and calls nothing.
 
-## The API catalog from a pipeline (`nb specs push`)
+## Repositories and the API catalog from a pipeline (`nb specs`)
 
-`nb specs push --file openapi.yaml` registers an OpenAPI document in the catalog (your own
-specs, Evolution): a new spec, or a new version of the one that has the same name (or `--id`).
+`nb specs` is generated from the catalog's contract like every other group, so it reads
+`nb specs <resource> <verb>`: `nb specs specs list`, `nb specs specs versions list <id>`,
+`nb specs repositories get <id>`, `nb specs groups list`, and `--org <id|personal>` (or
+`$NB_SPECS_ORG`) on each, since the catalog is per owner. The verbs a pipeline wants are
+hand-written and sit in the same tree: `specs push`, `specs pull`, `specs settings` and `repositories upsert`.
+The old direct form (`nb specs push`, `nb specs pull`, `nb specs versions`) still works, as hidden aliases.
+
+**The commands match the screens.** Each sub-menu of NASEBANAL Evolution's *API management* manages one resource of
+the catalog, and `nb specs <resource>` is that resource:
+
+| Evolution screen | Resource | Command group | What it holds |
+|---|---|---|---|
+| Repository Management | repositories | `nb specs repositories` | `provider`, `name`, `component` and the one repository setting, `attachments_enabled` (`upsert --attachments`, `update --attachments`) |
+| Spec Management | specs | `nb specs specs` | the spec (`push`, `update`, `delete`), its description document (`docs push|pull|delete`), the consumer-facing reference publishing (`update`: `reference_access`) and the quality settings: the public badge and report with their links (`settings`) |
+| Catalog | (a read-only view of the specs) | `nb specs specs list` / `get` / `versions list` / `docs pull` | what is registered, its revisions and its description document, to read |
+
+The quality settings (public badge and report with their links) are columns of the
+**spec**; the repository is where it lives (its identity) and holds one setting, **attachments**: whether a result may
+carry the original test report, which comes from the repository's CI. A spec is tied to a repository
+optionally, so either can be registered first.
+
+### Environments: one spec per environment, filed in a group
+
+An API deployed to several environments (development, staging, production) is **one OpenAPI file in the
+repository and one spec per environment**, each filed in a **group named after the environment**. What
+differs between them is where the API is served, which is the document's top-level `servers`: `push
+--server-url <url>` replaces it just before sending (see below), and the catalog's **contract hash**
+(`latest_contract_hash`, which ignores `servers`) says whether two environments run the same contract.
+A promotion is the same file pushed to the next environment's spec; a rollback is an older file pushed
+as a new revision of that environment's spec (the history stays one straight line). A spec's key is its
+**group, its repository row (provider, name, component), its API version and its name**: the same name may exist in other
+groups, which is exactly the case of the same API in two environments.
+
+```bash
+# the first run makes the group, the repository and the spec (idempotent; nothing set on a screen is overwritten)
+nb specs specs push --file openapi.yaml --group Staging --server-url https://staging.api.example.com/v1 \
+  --repository nasebanal/nb-account-api --name "Account API"
+# the spec's id goes to the environment's variable (GitHub: Settings > Environments > Staging > Variables)
+#   NB_SPEC_ID=<spec_id printed above>
+# every later run pushes a new version only if the document changed, and the test jobs report to NB_SPEC_ID
+```
+
+In GitHub Actions use **Environments**: the same workflow runs per environment and each environment carries
+its own `NB_SPEC_ID`, so the report steps are written once.
+
+### API versions: one spec per API version, one branch per version
+
+The **API version** (`v1`, `v2`) is a property of the **spec**, and a new major API version is a **new spec**. The numbered
+history inside a spec is its **revisions** (#1, #2, ...: one per push that changed the document; the catalog's `version`
+field). `nb specs specs push` takes the API version from the document: the major of `info.version` (`1.8.0` -> `v1`,
+`v2.0` -> `v2`, `1.0.0-rc.1` -> `v1`, `007.1` -> `v7`). A version that has no leading major (`2023-01`, `latest`, `1.x`) needs
+`--api-version <v>`; an explicit one always wins. So:
+
+- an additive change (an example, a new field) is a new **revision** of the same spec: bump `info.version` to `1.9.0`, push, and the
+  spec is still `v1`;
+- a breaking change is a new major (`2.0.0`): the same push makes the **v2 spec** and leaves v1 untouched; pushing a document of
+  another major to a spec by `--id` is refused (`API_VERSION_MISMATCH`: register it as its own spec).
+
+To maintain several API versions, keep each one on a **branch** of the repository with its own OpenAPI file, and let the same CI
+job push and report from whichever branch it runs on:
+
+```bash
+# main (v2, info.version 2.x) and release/v1 (v1, info.version 1.x): the same step on both branches
+nb specs specs push --file openapi.yaml --group Production --server-url "$API_URL" --repository nasebanal/nb-account-api --name "Account API"
+# test results: the spec of the branch's API version. Either the id (a variable per branch, picked in the workflow) ...
+nb assurance report upload --file junit.xml --kind e2e --tool playwright --spec-id "${{ github.ref_name == 'main' && vars.NB_SPEC_ID_V2 || vars.NB_SPEC_ID_V1 }}"
+# ... or by names, with the branch's API version
+nb assurance report upload --file junit.xml --kind e2e --tool playwright \
+  --repository nasebanal/nb-account-api --group Production --api-version "$API_VERSION" --spec "Account API"
+# a result that belongs to the source goes to every environment of THIS API version only
+nb assurance report upload --file junit.xml --kind unit --tool vitest --repository nasebanal/nb-account-api --all-specs --api-version "$API_VERSION"
+```
+
+`NB_SPEC_ID` is a per-repository or per-**environment** variable, not a per-branch one: with several API versions either pick
+the id in the workflow as above (one variable per API version) or report by names with `--api-version`.
+
+### A repository first (`nb specs repositories upsert`)
+
+A **repository** is where one or more of your APIs are implemented (something that is not in git,
+such as a vendor's delivery, is a repository with provider `other`). Its key is the **provider, the
+name and the component**: the component is your own name for a part of it (`account-api`, `web`),
+optional (none = the repository as a whole, which is a row of its own), and one id says which
+repository AND which component. A part of a monorepo is simply another row. Register it once, by
+hand or from the screen, and keep the id the catalog issues:
+
+```bash
+nb specs repositories upsert --provider github --name nasebanal/nb-recorder-api
+# -> {"id":"kMsl4TXEMmeN","provider":"github","name":"nasebanal/nb-recorder-api","component":""}
+nb specs repositories upsert --name nasebanal/nb-account-api --component account-internal
+nb specs repositories upsert --name nasebanal/nb-recorder-api --attachments on   # applied only when it registers the repository
+nb specs repositories update kMsl4TXEMmeN --attachments on                       # change it later (merged into --data)
+```
+
+It is idempotent (the same provider, name and component always answer the same id, and nothing
+set on a screen is overwritten: `--attachments` is applied only when the call registers the repository), so it is safe to repeat. Give the id to the pipeline as the repository
+variable `NB_REPOSITORY_ID` (it is not a secret, and it is not a file in the repository: a copy of
+a template would report into another repository); `nb specs specs push` reads it (or takes `--repository-id`) to tie
+the spec it registers. Test results do not use it: they are reported to the **spec** (`NB_SPEC_ID`), see below.
+
+### Registering a spec (`nb specs specs push`)
+
+`nb specs specs push --file openapi.yaml` registers an OpenAPI document in the catalog (your own
+specs, Evolution): a new spec, or a new revision of the one that has the same name at the same API version (or `--id`).
 It is made to run on **every commit**:
+
+- **A spec's key is its group, its repository row, its API version and its name** (a name is unique within a group, a
+  repository row, `repository + component`, and an API version; the ones with no group or no repository are unique among
+  themselves). So the name is looked up **inside the group you name** with `--group`, **inside the
+  repository you name** with `--repository [--component]` and **at the API version of the document** (its `info.version`,
+  or `--api-version`; see "API versions" above): another group's, repository's or API version's spec of that
+  name is not touched (a document of another major makes the new spec), and a spec with no repository is not adopted by name
+  (use `--id` to tie one).
+  **A group left out means "no group", not any group**: a name that exists only in groups is an error that
+  lists them and asks for `--group` (or `--id`), instead of silently making a second spec. With no
+  repository named, the spec that has none wins; a name held by exactly one spec is used; a name held by
+  several specs under repositories is refused, listing them.
+- **`--server-url <url>`** replaces the document's top-level `servers` with `[{ url }]` before sending: one file
+  in the repository, one URL per environment. A JSON file is edited as JSON; a YAML file as **text** (comments and
+  order kept) when the edit is proven safe (the document without `servers` must be identical), otherwise it is
+  written again (the CLI says so: comments are not kept in what is pushed; the file on disk is never changed).
+  The hash used for "unchanged" is of the text that is sent, so the same file to the same environment is
+  unchanged on the next run; `--dry-run` shows `server_url`.
 
 - **A retitled document needs `--id`.** Without it the spec is found by its name (the document's
   `info.title`), so a new title registers a second spec next to the old one. `--id <id>` pushes to
@@ -163,54 +283,123 @@ It is made to run on **every commit**:
   printed (`renamed_from` in the JSON). A rename happens only on request, so a name set by hand in
   the catalog is not overwritten on every push, and `--rename` without `--id` is refused.
 
-- **Nothing is uploaded when the file is already the latest version.** The CLI compares the
-  document's SHA-256 with the `content_hash` the catalog keeps for the latest version before it
-  sends anything; the same bytes print `unchanged (already vN: nothing uploaded)`. (The catalog
+- **Nothing is uploaded when the file is already the latest revision.** The CLI compares the
+  document's SHA-256 with the `content_hash` the catalog keeps for the latest revision before it
+  sends anything; the same bytes print `unchanged (already rev N of vM: nothing uploaded)`. (The catalog
   refuses an identical upload itself, `409 UNCHANGED`, which is also taken as "unchanged", for two
   jobs racing.) The comparison is of bytes: a generator that writes a timestamp into the
-  document makes a new version every run, so keep the output stable.
+  document makes a new revision every run, so keep the output stable.
 - **No group has to exist.** A spec is registered in no group unless `--group <name>` is given
-  (the group is made when missing); an existing spec is never moved by a push (the catalog
-  moves it, by drag and drop or the select on its page).
-- The name is `--name`, else the document's `info.title`, else the file's name. A new version
+  (the group is made when missing, on the first run); an existing spec is never moved by a push (the
+  catalog moves it, by drag and drop or the select on its page).
+- The name is `--name`, else the document's `info.title`, else the file's name. A new revision
   carries a note made from the commit, the branch and the CI run (`--note` replaces it), so
-  "which commit made v7" has an answer.
+  "which commit made revision 7" has an answer.
+- **`--api-version <v>`** names the API version when the document's `info.version` gives none (and always wins over it); a bad
+  label is refused before the catalog is read. The result prints `api_version`.
 - `--org <id|personal>` (or `$NB_SPECS_ORG`) says whose catalog it is: the catalog is per
   owner and needs `X-Active-Organization-Id`; `personal` (the default) is your own, an
   organization's needs its Enterprise plan. `--dry-run` reads the catalog and says what would
   happen. `NB_SPECS_BASE_URL` points it at another host (local: `http://localhost:8792`).
-- In GitHub Actions the spec's id is written to `$GITHUB_OUTPUT` as `spec_id`.
+- **A repository is optional.** `--repository-id <id>` (default `$NB_REPOSITORY_ID`) ties the spec
+  to that repository: a new spec is created tied to it, an existing spec that has none is tied to
+  it. `--repository <owner/name>` (+ `--provider`, default `github`, and the optional `--component`)
+  registers the repository first, idempotently, and uses the id it returns, for a pipeline that would rather not keep an
+  id. **A push never moves a spec:** one that is tied to another repository stays there and the
+  command says so (`repository_kept` in the JSON). A spec uploaded by hand needs no repository.
+- In GitHub Actions the spec's id is written to `$GITHUB_OUTPUT` as `spec_id`, and the repository's
+  as `repository_id`.
 
-### Reading a version back (`nb specs pull`, `nb specs versions`)
+### A spec's description document (`nb specs specs docs`)
+
+One **Markdown file per spec** (up to 200 KiB, UTF-8), shown rendered in the catalog beside the API reference, like
+a developer portal's overview page. It belongs to Spec Management; the catalog only shows it.
+
+```bash
+nb specs specs docs push --file README.md --spec-id kMsl4TXEMmeN     # added or replaced (201 / 200)
+nb specs specs docs push --file docs/overview.md --spec "Account API" --group Staging --repository nasebanal/nb-account-api
+nb specs specs docs pull --spec-id kMsl4TXEMmeN --out README.md      # or to standard output
+nb specs specs docs delete --spec-id kMsl4TXEMmeN                    # also when there is none
+```
+
+The spec is named like everywhere else: `--spec-id` (default `$NB_SPEC_ID`), or `--spec <name>` with the optional
+`--repository [--component]` and `--group`. For these verbs what is left out means none (a spec in no group, tied to no
+repository), so a spec that is tied to a repository needs `--repository`. The catalog answers `413` over 200 KiB and `415`
+for a body that is not Markdown; a missing file, an empty one and a binary one are refused before anything is sent. (This
+group replaces the generated `docs` leaf, whose body would be JSON.)
+
+### A spec's public settings (`nb specs specs settings`)
+
+```bash
+nb specs specs settings kMsl4TXEMmeN --public-badge on --report-access login
+nb specs specs settings kMsl4TXEMmeN --rotate-quality-public-id     # new badge / report links; the old ones stop
+```
+
+One `PATCH /specs/{id}` with only the flags you pass (the same fields as the screen: `public_badge`,
+`report_access` = `hidden` / `login` / `public`, `rotate_quality_public_id`); there is no API version rule any more (a spec has
+one API version, so a result needs none); it prints the spec, including its `quality_public_id`. A spec starts
+private. Attachments are the repository's, not the spec's (`nb specs repositories update <id> --attachments on`). (`nb specs specs update <id> --data '{...}'` does the same with a raw body.)
+
+### Which spec a result or a monitor is about
+
+Test results and external monitoring belong to a **spec that has a repository** (they are reported
+against that repository row). A command that needs one takes the spec by id, `--spec-id <id>`, or by
+the names of its key, `--repository <name> [--component <name>] [--group <name>] [--api-version <v>] --spec <name>`
+(`--provider`, default `github`; no `--component` = the repository as a whole; no `--group` = the specs in no group, not any;
+**no `--api-version` is the one exception to "left out means none"**: it is the API version of the one spec the rest of the key
+leaves, and when it leaves several the error lists their API versions and asks for `--api-version`);
+it never creates a spec or a
+repository (`--no-create` has no meaning for specs: register them with `nb specs`), and a spec that is tied to
+no repository is refused. The shared resolution is `resolveSpec` in `src/specs/resolve.ts`.
+
+**API quality assessment: screens and commands.** The three screens under *API quality assessment* in
+Evolution work on one API's data (Assurance), each of its sub-menus is a command group of `nb assurance`, and
+what they work on is a spec:
+
+| Evolution screen | Command | What it does |
+|---|---|---|
+| Charts | `nb assurance specs quality <id>` (and `nb assurance specs list` / `get`) | the quality dashboard data of a spec |
+| Test results | `nb assurance report upload` (to send), `nb assurance specs runs ...`, `nb assurance specs results ...` | register and read results |
+| External monitoring | `nb assurance monitors ...` | the monitors of a spec |
+
+```bash
+# A monitor is about a spec that has a repository: the spec by id or by names, put into the body as spec_id and repository_id
+nb assurance monitors create --spec-id kMsl4TXEMmeN --data '{"url":"https://api.example.com/health","method":"GET","interval_minutes":5,"timeout_ms":10000}'
+nb assurance monitors create --repository nasebanal/nb-account-api --spec "Account API" --data @monitor.json
+nb assurance monitors update <monitor-id> --spec-id kMsl4TXEMmeN --data '{"enabled":true}'   # moves it to that spec
+```
+
+### Reading a revision back (`nb specs specs pull`, `nb specs specs versions list`)
 
 A pipeline can work from the catalog's document instead of a copy kept in a repository (a
 contract test with Specmatic against the API's provider side, a stub for a consumer, a client
 generator):
 
 ```bash
-nb specs versions --name "Billing API"                      # versions newest first, each with its sha256
-nb specs pull --name "Billing API" --spec-version 3 --out spec.yaml
-nb specs pull --id kMsl4TXEMmeN --spec-version 3 --hash <sha256> --out spec.yaml   # pinned: fails if it differs
-nb specs pull --name "Billing API" > spec.yaml              # latest; the document is all of stdout
+nb specs specs versions list <id>                            # revisions newest first, each with its sha256
+nb specs specs pull --name "Billing API" --group Production --repository nasebanal/billing --spec-version 3 --out spec.yaml
+nb specs specs pull --id kMsl4TXEMmeN --spec-version 3 --hash <sha256> --out spec.yaml   # pinned: fails if it differs
+nb specs specs pull --name "Billing API" > spec.yaml        # latest; the document is all of stdout
 ```
 
-- **`--spec-version` is the catalog's version number** (1, 2, 3...: one per `nb specs push` that
-  changed the document). It is not the API's URL version (`v1`, `v2`, the label of a test result
-  in `nb assurance report upload --api-version`), not the document's own `info.version`, and not
-  the CLI's own `nb --version`.
+- **`--spec-version` is the catalog's revision number** (1, 2, 3...: one per `nb specs specs push` that
+  changed the document). It is not the API version (`v1`, `v2`: a property of the spec), not the document's own
+  `info.version`, and not the CLI's own `nb --version`.
   Absent or `latest` is the newest; **pin a number in a pipeline**, `latest` moves.
 - **The document comes back exactly as it was uploaded** (the bytes: a JSON document is not
   parsed and re-printed), and its SHA-256 is checked against the `content_hash` the catalog keeps
-  for that version, so a document that did not arrive intact fails. `--hash <sha256>` pins what
-  the pipeline expects, so a version that was replaced, or a name that now points at another
-  spec, fails instead of testing the wrong thing. `nb specs versions` prints the hashes.
-- A spec is named by `--id` (a rename cannot change it) or by `--name` (matched ignoring case).
+  for that revision, so a document that did not arrive intact fails. `--hash <sha256>` pins what
+  the pipeline expects, so a revision that was replaced, or a name that now points at another
+  spec, fails instead of testing the wrong thing. `nb specs specs versions list` prints the hashes.
+- A spec is named by `--id` (a rename cannot change it) or by `--name` (matched ignoring case); with `--group` and
+  `--repository [--component]` and `--api-version` the name is looked up in that group, repository row and API version (its key), which is
+  how the same name in two environments (or at two API versions) is told apart.
   `--org <id|personal>` / `$NB_SPECS_ORG` and `NB_SPECS_BASE_URL` work as for `push`. With `--out`
   the details are printed as JSON; without it they go to stderr. In GitHub Actions `spec_id`,
   `spec_version` and `spec_hash` are written to `$GITHUB_OUTPUT`.
 - The catalog has no "released" mark yet: unlike the `@nasebanal/api-specs-*` packages, which
   only advance once the provider has deployed, a pull of `latest` can return a version that
-  nothing implements. Pinning a version (and its hash) is the safe way to use it today.
+  nothing implements. Pinning a revision (and its hash) is the safe way to use it today.
 
 ## Installation
 

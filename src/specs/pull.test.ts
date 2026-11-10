@@ -106,8 +106,8 @@ describe("parseVersion / parseHash", () => {
     expect(parseVersion(" 12 ")).toBe(12);
   });
 
-  it("refuses what is not a version number, and says it is the catalog's version, not the API's", () => {
-    for (const bad of ["0", "-1", "1.5", "v2", "abc", "1e3"]) expect(() => parseVersion(bad), bad).toThrow(/catalog's version, not the API's v1 \/ v2/);
+  it("refuses what is not a revision number, and says it is the catalog's revision, not the API's", () => {
+    for (const bad of ["0", "-1", "1.5", "v2", "abc", "1e3"]) expect(() => parseVersion(bad), bad).toThrow(/catalog's revision, not the API's v1 \/ v2/);
   });
 
   it("takes 64 hex characters, lower-cased, or nothing; refuses the rest", () => {
@@ -144,7 +144,7 @@ describe("pullSpec", () => {
 
   it("says which versions exist when the asked one does not", async () => {
     catalog();
-    await expect(pullSpec({ conn, id: "s1", version: 7 })).rejects.toThrow(/has no version 7 \(it has 2, 1\)/);
+    await expect(pullSpec({ conn, id: "s1", version: 7 })).rejects.toThrow(/has no revision 7 \(it has 2, 1\)/);
   });
 
   it("needs a spec to be named, and says so before anything is sent", async () => {
@@ -159,9 +159,9 @@ describe("pullSpec", () => {
     await expect(pullSpec({ conn, id: "zzz" })).rejects.toThrow(/No spec with id 'zzz'/);
   });
 
-  it("says when a spec has no versions", async () => {
+  it("says when a spec has no revisions", async () => {
     catalog({ docs: [] });
-    await expect(pullSpec({ conn, id: "s1" })).rejects.toThrow(/has no versions/);
+    await expect(pullSpec({ conn, id: "s1" })).rejects.toThrow(/has no revisions/);
   });
 
   it("refuses a document whose hash is not the one the catalog lists for that version", async () => {
@@ -214,7 +214,7 @@ describe("nb specs pull / versions", () => {
     expect(readFileSync(out, "utf8")).toBe(V1);
     expect(JSON.parse(stdout.join(""))).toMatchObject({ id: "s1", version: 1, content_hash: hashText(V1), out });
     expect(stdout.join("")).not.toContain("Billing API\",\"version\""); // the document itself is not in the JSON
-    expect(stderr.join("")).toContain("✓ Billing API v1 (sha256 ");
+    expect(stderr.join("")).toContain("✓ Billing API rev 1 (sha256 ");
     expect(readFileSync(gh, "utf8")).toBe(`spec_id=s1\nspec_version=1\nspec_hash=${hashText(V1)}\n`);
   });
 
@@ -222,7 +222,7 @@ describe("nb specs pull / versions", () => {
     catalog();
     await run("pull", ["--id", "s1"]);
     expect(stdout.join("")).toBe(V2);
-    expect(stderr.join("")).toContain("✓ Billing API v2");
+    expect(stderr.join("")).toContain("✓ Billing API rev 2");
   });
 
   it("takes --version latest, and fails with exit-worthy errors for a bad --version / --hash before anything is sent", async () => {
@@ -230,7 +230,7 @@ describe("nb specs pull / versions", () => {
     await run("pull", ["--id", "s1", "--spec-version", "latest"]);
     expect(stdout.join("")).toBe(V2);
     calls.length = 0;
-    await expect(run("pull", ["--id", "s1", "--spec-version", "v2"])).rejects.toThrow(/catalog's version/);
+    await expect(run("pull", ["--id", "s1", "--spec-version", "v2"])).rejects.toThrow(/catalog's revision/);
     await expect(run("pull", ["--id", "s1", "--hash", "nope"])).rejects.toThrow(/SHA-256/);
     expect(calls).toHaveLength(0);
   });
@@ -252,7 +252,7 @@ describe("nb specs pull / versions", () => {
     await run("versions", ["--name", "Billing API"]);
     const printed = JSON.parse(stdout.join(""));
     expect(printed.versions.map((v: { version: number }) => v.version)).toEqual([2, 1]);
-    expect(stderr.join("")).toContain("✓ Billing API: 2 versions (latest v2)");
+    expect(stderr.join("")).toContain("✓ Billing API: 2 revisions (latest rev 2)");
   });
 
   it("refuses an organization that is not an id before anything is sent", async () => {
@@ -265,3 +265,25 @@ describe("nb specs pull / versions", () => {
     expect(buildSpecsCommand().commands.map((c) => c.name()).sort()).toEqual(["pull", "push", "versions"]);
   });
 });
+
+describe("versions / pull with the spec's key (group and repository)", () => {
+  it("looks the name up in the group and repository asked for, so the same name in another environment is not mixed up", async () => {
+    const json = (data: unknown) => new Response(JSON.stringify({ success: true, data }), { status: 200, headers: { "Content-Type": "application/json" } });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: URL) => {
+        const path = new URL(String(input)).pathname;
+        if (path === "/api/v1/groups") return json({ data: [{ id: "g-prod", name: "Production" }, { id: "g-stg", name: "Staging" }] });
+        if (path === "/api/v1/repositories") return json({ data: [{ id: "r1", provider: "github", name: "acme/billing", component: "" }] });
+        if (path === "/api/v1/specs") return json({ data: [{ id: "s-prod", name: "Billing API", group_id: "g-prod", repository_id: "r1" }, { id: "s-stg", name: "Billing API", group_id: "g-stg", repository_id: "r1" }] });
+        if (path === "/api/v1/specs/s-stg/versions") return json({ data: [{ version: 3, content_hash: "h" }] });
+        return new Response("{}", { status: 500 });
+      }),
+    );
+    const conn = { baseUrl: "http://specs.test", token: "tkn", org: "personal" };
+    const out = await specVersions({ conn, name: "billing api", where: { group: "Staging", repository: "acme/billing" } });
+    expect(out).toMatchObject({ id: "s-stg", name: "Billing API" });
+    await expect(specVersions({ conn, name: "Billing API", where: { group: "Staging", repository: "acme/billing", component: "web" } })).rejects.toThrow(/No repository github acme\/billing \/ web/);
+  });
+});
+

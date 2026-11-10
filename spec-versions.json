@@ -1,6 +1,7 @@
 {
-  "account": "1.7.0",
+  "account": "1.8.0",
   "recorder": "1.7.0",
-  "target": "1.5.0",
-  "assurance": "1.9.2"
+  "target": "1.5.1",
+  "assurance": "2.0.0",
+  "specs": "1.3.0"
 }
