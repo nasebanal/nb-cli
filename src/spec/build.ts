@@ -30,7 +30,14 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import type { ApiEntry } from "../apis.js";
-import { loadSpec, type HttpMethod, type OpenApiOperation, type OpenApiSpec } from "./loader.js";
+import {
+  loadSpec,
+  type HttpMethod,
+  type OpenApiOperation,
+  type OpenApiParameter,
+  type OpenApiParameterOrRef,
+  type OpenApiSpec,
+} from "./loader.js";
 import { resolveBaseUrl, request } from "../http.js";
 import { resolveAccessToken, resolveEnv, type Environment } from "../config.js";
 import { printJson } from "../output.js";
@@ -92,6 +99,37 @@ function group(parent: Command, name: string): Command {
   return cmd;
 }
 
+/** The parameters of an operation as the spec means them: the path's shared ones and its own, `$ref`s resolved, own wins. */
+function resolveParameters(spec: OpenApiSpec, shared: OpenApiParameterOrRef[] | undefined, own: OpenApiParameterOrRef[] | undefined): OpenApiParameter[] {
+  const out = new Map<string, OpenApiParameter>();
+  for (const raw of [...(shared ?? []), ...(own ?? [])]) {
+    let p: OpenApiParameter | undefined;
+    if ("$ref" in raw) {
+      const name = raw.$ref.replace(/^#\/components\/parameters\//, "");
+      p = spec.components?.parameters?.[name];
+    } else {
+      p = raw;
+    }
+    if (p) out.set(`${p.in}:${p.name.toLowerCase()}`, p);
+  }
+  return [...out.values()];
+}
+
+/**
+ * The `--flag` a header parameter becomes. The active organization (`X-Active-Organization-Id`) is `--org`, the same flag
+ * the hand-written `nb specs` verbs take; any other header is its name without the `X-` prefix, in kebab case.
+ */
+export function headerFlag(header: string): string {
+  if (header.toLowerCase() === "x-active-organization-id") return "org";
+  return header.toLowerCase().replace(/^x-/, "");
+}
+
+/** `personal`, or an organization's id: the only two values the active-organization header takes. */
+function checkOrgValue(raw: string): string {
+  if (raw === "personal" || /^[1-9]\d{0,17}$/.test(raw)) return raw;
+  throw new Error(`--org '${raw}' must be 'personal' or an organization id (a number)`);
+}
+
 function readData(value: string): unknown {
   const raw = value.startsWith("@") ? readFileSync(value.slice(1), "utf8") : value;
   try {
@@ -108,6 +146,8 @@ function attachLeaf(
   method: HttpMethod,
   op: OpenApiOperation,
   servers: OpenApiSpec["servers"],
+  parameters: OpenApiParameter[],
+  apiName: string,
 ): void {
   const leaf = new Command(name);
   leaf.description(op.summary || `${method.toUpperCase()} ${pathTemplate}`);
@@ -115,9 +155,20 @@ function attachLeaf(
   const params = pathParams(pathTemplate);
   for (const p of params) leaf.argument(`<${p}>`, `path parameter: ${p}`);
 
-  const queryParams = (op.parameters ?? []).filter((p) => p.in === "query");
+  const queryParams = parameters.filter((p) => p.in === "query");
   for (const q of queryParams) {
     leaf.option(`--${q.name} <value>`, q.description || `query parameter: ${q.name}`);
+  }
+  // A header the API wants on the call (the catalog's active organization). A required one has a default, so the
+  // command works without the flag; the active organization also reads $NB_<API>_ORG (NB_SPECS_ORG for `nb specs`).
+  const headerParams = parameters.filter((p) => p.in === "header" && p.name.toLowerCase() !== "authorization");
+  for (const h of headerParams) {
+    const flag = headerFlag(h.name);
+    const envName = flag === "org" ? `NB_${apiName.toUpperCase()}_ORG` : undefined;
+    leaf.option(
+      `--${flag} <value>`,
+      `${h.name} header${flag === "org" ? ": an organization id, or 'personal'" : ""}${h.required ? " (default: personal)" : ""}${envName ? ` (or $${envName})` : ""}`,
+    );
   }
 
   const acceptsBody = method !== "get" && method !== "delete";
@@ -149,7 +200,15 @@ function attachLeaf(
 
     const body = opts.data !== undefined ? readData(opts.data) : undefined;
 
-    const res = await request({ baseUrl, path: realPath, method, query, body, token });
+    const headers: Record<string, string> = {};
+    for (const h of headerParams) {
+      const flag = headerFlag(h.name);
+      const fromEnv = flag === "org" ? process.env[`NB_${apiName.toUpperCase()}_ORG`]?.trim() || undefined : undefined;
+      const value = opts[flag] ?? fromEnv ?? (h.required && flag === "org" ? "personal" : undefined);
+      if (value !== undefined) headers[h.name] = flag === "org" ? checkOrgValue(value) : value;
+    }
+
+    const res = await request({ baseUrl, path: realPath, method, query, body, token, headers });
     printJson(res.data);
   });
 
@@ -161,6 +220,7 @@ interface Operation {
   path: string;
   method: HttpMethod;
   op: OpenApiOperation;
+  parameters: OpenApiParameter[];
 }
 
 /** Build the top-level command group for one API from its spec. */
@@ -175,7 +235,13 @@ export function buildApiCommand(api: ApiEntry): Command {
     for (const method of METHODS) {
       const op = item[method];
       if (!op) continue;
-      const entry: Operation = { chain: commandChain(method, path), path, method, op };
+      const entry: Operation = {
+        chain: commandChain(method, path),
+        path,
+        method,
+        op,
+        parameters: resolveParameters(spec, item.parameters, op.parameters),
+      };
       const key = entry.chain.join(" ");
       const existing = byChain.get(key);
       if (!existing || pathParams(path).length > pathParams(existing.path).length) {
@@ -212,11 +278,11 @@ export function buildApiCommand(api: ApiEntry): Command {
     byChain.set(key, { ...entry, chain: renamed });
   }
 
-  for (const { chain, path, method, op } of byChain.values()) {
+  for (const { chain, path, method, op, parameters } of byChain.values()) {
     const leafName = chain[chain.length - 1];
     let parent = root;
     for (const segment of chain.slice(0, -1)) parent = group(parent, segment);
-    attachLeaf(parent, leafName, path, method, op, spec.servers);
+    attachLeaf(parent, leafName, path, method, op, spec.servers, parameters, api.name);
   }
 
   return root;

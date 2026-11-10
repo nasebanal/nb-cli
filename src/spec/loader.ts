@@ -16,7 +16,7 @@ export interface OpenApiOperation {
   summary?: string;
   description?: string;
   tags?: string[];
-  parameters?: OpenApiParameter[];
+  parameters?: OpenApiParameterOrRef[];
   requestBody?: { required?: boolean; content?: Record<string, unknown> };
   security?: unknown[];
 }
@@ -34,10 +34,17 @@ export interface OpenApiServer {
   description?: string;
 }
 
+/** A parameter, or a `$ref` to one of `components.parameters`. */
+export type OpenApiParameterOrRef = OpenApiParameter | { $ref: string };
+
+/** The operations of one path, plus the parameters shared by all of them. */
+export type OpenApiPathItem = Partial<Record<HttpMethod, OpenApiOperation>> & { parameters?: OpenApiParameterOrRef[] };
+
 export interface OpenApiSpec {
   info: { title: string; version: string; description?: string };
   servers?: OpenApiServer[];
-  paths: Record<string, Partial<Record<HttpMethod, OpenApiOperation>>>;
+  paths: Record<string, OpenApiPathItem>;
+  components?: { parameters?: Record<string, OpenApiParameter> };
 }
 
 export function specPath(file: string): string {

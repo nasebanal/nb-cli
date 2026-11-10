@@ -20,5 +20,6 @@ export const API_CATALOG: ApiEntry[] = [
   { name: "account", spec: "account.yaml", summary: "User profiles, subscriptions, billing, and API tokens" },
   { name: "record", spec: "recorder.yaml", summary: "Records and tags (NASEBANAL Recorder)" },
   { name: "target", spec: "target.yaml", summary: "Targets, cells, and shares (NASEBANAL Target)" },
-  { name: "assurance", spec: "assurance.yaml", summary: "Monitors, projects and CI/CD test results (NASEBANAL Assurance)" },
+  { name: "assurance", spec: "assurance.yaml", summary: "Monitors and CI/CD test results of your specs (NASEBANAL Assurance, API quality assessment)" },
+  { name: "specs", spec: "specs.yaml", summary: "Repositories and your own OpenAPI documents: the API catalog (NASEBANAL Evolution)" },
 ];

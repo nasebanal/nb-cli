@@ -1,11 +1,11 @@
 /**
  * `nb specs pull` / `nb specs versions` - read a document back out of the API catalog (nb-specs-api), the other half of
- * `nb specs push`: a pipeline asks the catalog for a given version of an API's document and works from that (a contract
+ * `nb specs push`: a pipeline asks the catalog for a given revision of an API's document and works from that (a contract
  * test with Specmatic, a client generator) instead of from a copy that lives in some repository.
  *
  *   - a spec is named by `--id` (what a rename cannot change) or by `--name` (matched ignoring case, like push)
- *   - `--spec-version` is the catalog's version NUMBER (1, 2, 3...: one per `nb specs push` that changed the document),
- *     not the API's URL version (`v1`, `v2`) and not the document's own `info.version`; absent or `latest` = the newest
+ *   - `--spec-version` is the catalog's REVISION number (1, 2, 3...: one per `nb specs push` that changed the document),
+ *     not the API's version (`v1`, `v2`: a property of the spec) and not the document's own `info.version`; absent or `latest` = the newest
  *   - the document comes back exactly as it was uploaded (the bytes, not a re-serialised copy), and its SHA-256 is
  *     checked against the `content_hash` the catalog keeps for that version; `--hash` pins what a pipeline expects, so
  *     a version that was swapped, or a name that now points somewhere else, fails instead of testing the wrong thing
@@ -13,6 +13,7 @@
 import { ApiError, request } from "../http.js";
 import { envTokenHint } from "../output.js";
 import { findSpec, hashText, headersOf, reasonOf, type Envelope, type SpecRow, type SpecsConnection } from "./push.js";
+import { locateSpec, type SpecRef } from "./resolve.js";
 
 /** One row of a spec's version list, as the catalog answers it (the documents themselves are not in the list). */
 export interface SpecVersion {
@@ -34,9 +35,10 @@ export interface VersionsResult {
 
 export interface PullParams {
   conn: SpecsConnection;
-  /** The spec, by id or by name: one of them. */
+  /** The spec, by id or by name: one of them. A name alone must match exactly one spec; add `where` to say which. */
   id?: string;
   name?: string;
+  where?: SpecWhere;
   /** A catalog version number; absent = the latest. */
   version?: number;
   /** The SHA-256 (hex) the document must have; the pull fails when it does not. */
@@ -58,7 +60,7 @@ export function parseVersion(raw: string | undefined): number | undefined {
   const v = raw?.trim();
   if (v === undefined || v === "" || v.toLowerCase() === "latest") return undefined;
   if (/^[1-9]\d{0,8}$/.test(v)) return Number(v);
-  throw new Error(`--spec-version '${raw}' must be a version number (1, 2, 3...) or 'latest'. It is the catalog's version, not the API's v1 / v2`);
+  throw new Error(`--spec-version '${raw}' must be a revision number (1, 2, 3...) or 'latest'. It is the catalog's revision, not the API's v1 / v2`);
 }
 
 /** `--hash`: 64 hex characters (case does not matter). Returns it lower-cased, or undefined when none was asked. */
@@ -82,8 +84,15 @@ async function refusal<T>(what: string, run: () => Promise<T>): Promise<T> {
   }
 }
 
-async function resolveSpec(conn: SpecsConnection, id?: string, name?: string): Promise<SpecRow> {
+/** With a name: which group / repository row the spec is in (the spec's key); anything left out means none, as for `report upload`. */
+export type SpecWhere = Pick<SpecRef, "group" | "repository" | "component" | "provider" | "apiVersion">;
+
+async function resolveSpec(conn: SpecsConnection, id?: string, name?: string, where?: SpecWhere): Promise<SpecRow> {
   if (!id && !name?.trim()) throw new Error("Say which spec: --id <id> or --name <name> (the name is the spec's title in the catalog)");
+  if (!id && where && (where.group || where.repository || where.apiVersion)) {
+    const hit = await locateSpec(conn, { spec: name!.trim(), ...where });
+    return { id: hit.spec.id, name: hit.spec.name, group_id: hit.spec.group_id ?? null, repository_id: hit.spec.repository_id ?? null, latest_version: 0 };
+  }
   const spec = await findSpec(conn, name?.trim() ?? "", id);
   if (!spec) {
     throw new Error(`No spec named '${name}' in the catalog (names match ignoring case; check --org: the catalog is per owner, and 'nb specs versions' needs the exact name or the id).`);
@@ -96,23 +105,23 @@ async function listVersions(conn: SpecsConnection, spec: SpecRow): Promise<SpecV
   return (res.data as Envelope<{ data: SpecVersion[] }>).data.data;
 }
 
-/** The versions of a spec, newest first, each with the SHA-256 of its document (what `--hash` pins). */
-export async function specVersions(p: { conn: SpecsConnection; id?: string; name?: string }): Promise<VersionsResult> {
+/** The revisions of a spec, newest first, each with the SHA-256 of its document (what `--hash` pins). */
+export async function specVersions(p: { conn: SpecsConnection; id?: string; name?: string; where?: SpecWhere }): Promise<VersionsResult> {
   return refusal("the request", async () => {
-    const spec = await resolveSpec(p.conn, p.id, p.name);
+    const spec = await resolveSpec(p.conn, p.id, p.name, p.where);
     return { id: spec.id, name: spec.name, versions: await listVersions(p.conn, spec) };
   });
 }
 
-/** A version's document exactly as uploaded, verified against the catalog's hash (and `--hash`). */
+/** A revision's document exactly as uploaded, verified against the catalog's hash (and `--hash`). */
 export async function pullSpec(p: PullParams): Promise<PullResult> {
   return refusal("the request", async () => {
-    const spec = await resolveSpec(p.conn, p.id, p.name);
+    const spec = await resolveSpec(p.conn, p.id, p.name, p.where);
     const versions = await listVersions(p.conn, spec);
-    if (versions.length === 0) throw new Error(`Spec '${spec.name}' has no versions.`);
+    if (versions.length === 0) throw new Error(`Spec '${spec.name}' has no revisions.`);
     const picked = p.version === undefined ? versions[0] : versions.find((v) => v.version === p.version);
     if (!picked) {
-      throw new Error(`Spec '${spec.name}' has no version ${p.version} (it has ${versions.map((v) => v.version).join(", ")}). The version is the catalog's number: 'nb specs versions' lists them.`);
+      throw new Error(`Spec '${spec.name}' has no revision ${p.version} (it has ${versions.map((v) => v.version).join(", ")}). The revision is the catalog's number: 'nb specs versions' lists them.`);
     }
 
     const res = await request({
@@ -126,11 +135,11 @@ export async function pullSpec(p: PullParams): Promise<PullResult> {
 
     // The catalog keeps the hash of what it stored: a document that does not match it was damaged on the way.
     if (picked.content_hash && hash !== picked.content_hash) {
-      throw new Error(`The document of '${spec.name}' v${picked.version} has SHA-256 ${hash}, not the ${picked.content_hash} the catalog lists for it: it did not arrive intact.`);
+      throw new Error(`The document of '${spec.name}' rev ${picked.version} has SHA-256 ${hash}, not the ${picked.content_hash} the catalog lists for it: it did not arrive intact.`);
     }
     // And the one a pipeline pinned: the version, or what the name points at, is no longer what it expected.
     if (p.hash && hash !== p.hash) {
-      throw new Error(`The document of '${spec.name}' v${picked.version} has SHA-256 ${hash}, not the ${p.hash} you pinned with --hash: the version was replaced, or the name now points at another spec.`);
+      throw new Error(`The document of '${spec.name}' rev ${picked.version} has SHA-256 ${hash}, not the ${p.hash} you pinned with --hash: the revision was replaced, or the name now points at another spec.`);
     }
     return { id: spec.id, name: spec.name, version: picked.version, content_hash: hash, size_bytes: Buffer.byteLength(text, "utf8"), text };
   });

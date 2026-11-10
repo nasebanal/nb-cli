@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { buildApiCommand } from "./build.js";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { Command } from "commander";
+import { buildApiCommand, headerFlag } from "./build.js";
 import type { ApiEntry } from "../apis.js";
 
 // These exercise the command-mapping rules against the synced specs. Run
@@ -83,5 +84,90 @@ describe("command mapping", () => {
       };
       walk(root, []);
     }
+  });
+});
+
+describe("the specs API (repositories and the catalog)", () => {
+  const specs: ApiEntry = { name: "specs", spec: "specs.yaml", summary: "" };
+
+  it("is generated like the other groups: <resource> <verb>", () => {
+    const l = leaves(specs);
+    for (const c of [
+      "specs list",
+      "specs get",
+      "specs update",
+      "specs delete",
+      "specs versions list",
+      "specs versions create",
+      "repositories list",
+      "repositories replace",
+      "repositories get",
+      "repositories update",
+      "repositories delete",
+      "groups list",
+      "groups create",
+      "access get",
+    ]) {
+      expect(l, c).toContain(c);
+    }
+  });
+
+  it("names a header after its flag: the active organization is --org", () => {
+    expect(headerFlag("X-Active-Organization-Id")).toBe("org");
+    expect(headerFlag("x-active-organization-id")).toBe("org");
+    expect(headerFlag("X-Request-Source")).toBe("request-source");
+  });
+});
+
+describe("a header parameter (the catalog's active organization) on a generated command", () => {
+  const specs: ApiEntry = { name: "specs", spec: "specs.yaml", summary: "" };
+  let headers: Record<string, string>[];
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const run = async (args: string[]) => {
+    headers = [];
+    vi.stubEnv("NB_BASE_URL", "http://specs.test");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: URL, init: RequestInit) => {
+        headers.push(init.headers as Record<string, string>);
+        return new Response(JSON.stringify({ success: true, data: { data: [], total: 0, limit: 100 } }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const program = new Command().exitOverride().option("--env <env>").option("--token <token>");
+    program.addCommand(buildApiCommand(specs));
+    const walk = (c: Command) => {
+      c.exitOverride();
+      c.commands.forEach(walk);
+    };
+    program.commands.forEach(walk);
+    await program.parseAsync(["node", "nb", "--token", "tkn", "specs", ...args]);
+  };
+
+  it("sends --org as X-Active-Organization-Id, and `personal` when nothing is said (the header is required)", async () => {
+    vi.stubEnv("NB_SPECS_ORG", "");
+    await run(["repositories", "list", "--org", "7"]);
+    expect(headers[0]["X-Active-Organization-Id"]).toBe("7");
+    await run(["repositories", "list"]);
+    expect(headers[0]["X-Active-Organization-Id"]).toBe("personal");
+  });
+
+  it("reads $NB_SPECS_ORG, which the flag beats", async () => {
+    vi.stubEnv("NB_SPECS_ORG", "9");
+    await run(["repositories", "list"]);
+    expect(headers[0]["X-Active-Organization-Id"]).toBe("9");
+    await run(["repositories", "list", "--org", "personal"]);
+    expect(headers[0]["X-Active-Organization-Id"]).toBe("personal");
+  });
+
+  it("refuses an organization that is not an id before anything is sent", async () => {
+    vi.stubEnv("NB_SPECS_ORG", "");
+    await expect(run(["repositories", "list", "--org", "acme"])).rejects.toThrow(/organization id/);
+    expect(headers).toHaveLength(0);
   });
 });

@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
-import { MAX_CASES, buildReportUploadCommand, checkApiVersion, checkRepoUrl, checkProjectId, checkSpecEnvironment, checkSpecId, checkProvider, checkReportPath, checkSuite, parseMetrics, parseReport, prepareAttachment, toCases } from "./upload.js";
+import { MAX_CASES, buildReportUploadCommand, checkRepoUrl, checkSpecId, specRefOf, checkProvider, checkReportPath, checkSuite, parseMetrics, parseReport, prepareAttachment, toCases } from "./upload.js";
 
 const JUNIT = `<testsuites><testsuite name="s"><testcase classname="c" name="a" time="1.5"/><testcase classname="c" name="b"><failure message="nope"/></testcase></testsuite></testsuites>`;
 const LOCUST_STATS =
@@ -27,6 +28,11 @@ beforeEach(() => {
   vi.stubEnv("GITHUB_ACTIONS", "");
   vi.stubEnv("GITLAB_CI", "");
   vi.stubEnv("NB_API_VERSION", "");
+  // The id of the spec a pipeline reports to, as its variable carries it; the catalog is another host.
+  vi.stubEnv("NB_SPEC_ID", "sp1");
+  vi.stubEnv("NB_REPOSITORY_ID", "");
+  vi.stubEnv("NB_SPECS_BASE_URL", "http://specs.test");
+  vi.stubEnv("NB_SPECS_ORG", "");
   process.exitCode = undefined;
 });
 afterEach(() => {
@@ -36,37 +42,44 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** A fake Assurance API: `existing` is the project the name lookup finds (if any). */
-function stubApi(existing: { id: string; repo?: string | null; spec_id?: string | null; spec_environment?: string | null } | null, opts: { conflictOnCreate?: boolean; resultsStatus?: number; attachmentStatus?: number } = {}) {
-  let created = false;
+interface CatalogRepo { id: string; provider: string; name: string; component?: string }
+interface CatalogSpec { id: string; name: string; repository_id: string | null; group_id?: string | null }
+
+/**
+ * A fake Assurance API (api.test) and catalog (specs.test). The first argument is ignored (older tests passed a project to
+ * find). The catalog holds `repositories` and `specs` (by default one spec, `sp1` "Target API", tied to repository `rp1`):
+ * results go to `POST /api/v1/specs/{id}/results` with the repository the spec is tied to in the body.
+ */
+function stubApi(
+  _unused?: unknown,
+  opts: { resultsStatus?: number; resultsError?: { code: string; message: string }; attachmentStatus?: number; repositories?: CatalogRepo[]; specs?: CatalogSpec[]; groups?: { id: string; name: string }[] } = {},
+) {
+  const repositories = opts.repositories ?? [{ id: "rp1", provider: "github", name: "nasebanal/nb-target-api", component: "" }];
+  const specs = opts.specs ?? [{ id: "sp1", name: "Target API", repository_id: "rp1" }];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: URL, init: RequestInit) => {
       const url = new URL(String(input));
       const isAttach = url.pathname.endsWith("/attachment");
       const body = init.body && !isAttach ? JSON.parse(String(init.body)) : undefined;
+      const headers = init.headers as Record<string, string>;
       calls.push({
         method: String(init.method),
         url,
         body,
-        ...(isAttach ? { bytes: init.body as Uint8Array, contentType: (init.headers as Record<string, string>)["Content-Type"] } : {}),
+        org: headers["X-Active-Organization-Id"],
+        ...(isAttach ? { bytes: init.body as Uint8Array, contentType: headers["Content-Type"] } : {}),
       });
       const json = (status: number, data: unknown) =>
         new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
-      if (init.method === "GET" && url.pathname !== "/api/v1/projects") {
-        return json(200, { success: true, data: existing ?? { id: "unknown" } });
-      }
-      if (init.method === "PATCH") return json(200, { success: true, data: { id: "patched" } });
-      if (init.method === "GET") {
-        const hit = existing ?? (created ? { id: "raced" } : null);
-        return json(200, { success: true, data: { data: hit ? [hit] : [], total: hit ? 1 : 0, limit: 20 } });
-      }
-      if (url.pathname === "/api/v1/projects") {
-        if (opts.conflictOnCreate) {
-          created = true;
-          return json(409, { success: false, error: { code: "CONFLICT", message: "exists" } });
-        }
-        return json(201, { success: true, data: { id: "new1" } });
+      if (url.host === "specs.test") {
+        const path = url.pathname;
+        if (path === "/api/v1/repositories") return json(200, { success: true, data: { data: repositories, total: repositories.length, limit: 100 } });
+        if (path === "/api/v1/specs") return json(200, { success: true, data: { data: specs, total: specs.length, limit: 100 } });
+        if (path === "/api/v1/groups") return json(200, { success: true, data: { data: opts.groups ?? [], total: 0, limit: 10 } });
+        const one = /^\/api\/v1\/(specs|repositories)\/([^/]+)$/.exec(path);
+        const row = one ? (one[1] === "specs" ? specs : repositories).find((x) => x.id === one[2]) : undefined;
+        return row ? json(200, { success: true, data: row }) : json(404, { success: false, error: { code: "NOT_FOUND", message: "not found" } });
       }
       if (isAttach) {
         if (opts.attachmentStatus && opts.attachmentStatus >= 400) {
@@ -75,7 +88,7 @@ function stubApi(existing: { id: string; repo?: string | null; spec_id?: string 
         return json(201, { success: true, data: { suite_id: "suite1", name: "x", size_bytes: 1 } });
       }
       if (opts.resultsStatus && opts.resultsStatus >= 400) {
-        return json(opts.resultsStatus, { success: false, error: { code: "NOT_FOUND", message: "Project not found" } });
+        return json(opts.resultsStatus, { success: false, error: opts.resultsError ?? { code: "NOT_FOUND", message: "Spec not found" } });
       }
       return json(201, { success: true, data: { run_id: "run1", suite_id: "suite1", replaced: false } });
     }),
@@ -84,8 +97,9 @@ function stubApi(existing: { id: string; repo?: string | null; spec_id?: string 
 
 async function run(args: string[]) {
   const program = new Command().exitOverride().option("--env <env>").option("--token <token>");
-  const assurance = program.command("assurance");
-  assurance.command("report").addCommand(buildReportUploadCommand());
+  // A usage error must throw (not exit the process) in every command of the tree.
+  const assurance = program.command("assurance").exitOverride();
+  assurance.command("report").exitOverride().addCommand(buildReportUploadCommand().exitOverride());
   await program.parseAsync(["node", "nb", "--token", "tkn", "assurance", "report", "upload", ...args]);
 }
 
@@ -177,8 +191,8 @@ describe("parseReport", () => {
 });
 
 describe("nb assurance report upload", () => {
-  it("creates the project when missing, then reports the result with CI details", async () => {
-    stubApi(null);
+  it("reports the result to the spec whose id the pipeline carries, with the repository it is tied to and the CI details", async () => {
+    stubApi();
     vi.stubEnv("GITHUB_ACTIONS", "true");
     vi.stubEnv("GITHUB_REPOSITORY", "nasebanal/nb-target-api");
     vi.stubEnv("GITHUB_RUN_ID", "555");
@@ -187,12 +201,9 @@ describe("nb assurance report upload", () => {
     vi.stubEnv("GITHUB_REF_NAME", "main");
     await run(["--file", junitFile(), "--kind", "unit", "--tool", "vitest"]);
 
-    expect(calls.map((c) => `${c.method} ${c.url.pathname}${c.url.search}`)).toEqual([
-      "GET /api/v1/projects?name=nasebanal%2Fnb-target-api",
-      "POST /api/v1/projects",
-      "POST /api/v1/projects/new1/results",
-    ]);
-    expect(calls[1].body).toEqual({ name: "nasebanal/nb-target-api", repo: "nasebanal/nb-target-api" });
+    // The catalog is read (the spec, then the repository it is tied to), nothing is created, and the result goes to the spec.
+    expect(calls.map((c) => `${c.method} ${c.url.host}${c.url.pathname}`)).toEqual(["GET specs.test/api/v1/specs/sp1", "GET specs.test/api/v1/repositories/rp1", "POST api.test/api/v1/specs/sp1/results"]);
+    expect(calls[2].body.repository_id).toBe("rp1");
     expect(calls[2].body.run).toEqual({
       key: "555-1",
       commit_sha: "abc123",
@@ -202,43 +213,28 @@ describe("nb assurance report upload", () => {
       repo_url: "https://github.com/nasebanal/nb-target-api",
     });
     expect(calls[2].body.suite).toMatchObject({ kind: "unit", tool: "vitest", status: "failed", tests: { total: 2, passed: 1, failed: 1, skipped: 0 }, duration_ms: 1500 });
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ project_id: "new1", project_created: true, run_id: "run1", replaced: false });
-    expect(stderr.join("")).toContain("(created)");
+    expect(JSON.parse(stdout.join(""))).toEqual({ spec_id: "sp1", repository_id: "rp1", run_id: "run1", suite_id: "suite1", replaced: false });
     expect(process.exitCode).toBeUndefined();
   });
 
-  it("uses the project that already exists and sends the bearer token", async () => {
-    stubApi({ id: "p9" });
-    await run(["--file", junitFile(), "--kind", "e2e", "--tool", "playwright", "--project", "demo", "--run-key", "k1"]);
-    expect(calls.map((c) => c.method + " " + c.url.pathname)).toEqual(["GET /api/v1/projects", "POST /api/v1/projects/p9/results"]);
-    expect(calls[0].url.searchParams.get("name")).toBe("demo");
+  it("sends the bearer token", async () => {
+    stubApi();
+    await run(["--file", junitFile(), "--kind", "e2e", "--tool", "playwright", "--run-key", "k1"]);
     const headers = (fetch as unknown as { mock: { calls: [URL, RequestInit][] } }).mock.calls[0][1].headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer tkn");
-  });
-
-  it("recovers when another job creates the project first (409)", async () => {
-    stubApi(null, { conflictOnCreate: true });
-    await run(["--file", junitFile(), "--kind", "unit", "--tool", "pytest", "--project", "demo", "--run-key", "k"]);
-    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/projects/raced/results");
-  });
-
-  it("refuses to create a missing project with --no-create-project", async () => {
-    stubApi(null);
-    await expect(run(["--file", junitFile(), "--kind", "unit", "--tool", "pytest", "--project", "demo", "--run-key", "k", "--no-create-project"])).rejects.toThrow(/No project named 'demo'/);
-    expect(calls).toHaveLength(1);
   });
 
   it("uploads a Locust directory as a load suite, with the allowed failure ratio from the environment", async () => {
     stubApi({ id: "p1" });
     writeFileSync(join(dir, "locust_stats.csv"), LOCUST_STATS.replace(",200,0,", ",200,4,"));
     vi.stubEnv("LOCUST_MAX_FAIL_RATIO", "0.05");
-    await run(["--dir", dir, "--project", "demo", "--run-key", "k"]);
+    await run(["--dir", dir, "--spec-id", "sp1", "--run-key", "k"]);
     expect(calls.at(-1)!.body.suite).toMatchObject({ kind: "load", tool: "locust", status: "passed", tests: { total: 200, passed: 196, failed: 4 } });
   });
 
   it("--dry-run prints the payload and calls nothing", async () => {
     stubApi(null);
-    await run(["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--project", "demo", "--run-key", "k", "--dry-run"]);
+    await run(["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--spec-id", "sp1", "--run-key", "k", "--dry-run"]);
     expect(calls).toHaveLength(0);
     expect(JSON.parse(stdout.join("")).payload.run.key).toBe("k");
   });
@@ -247,7 +243,7 @@ describe("nb assurance report upload", () => {
     stubApi(null);
     const cov = join(dir, "report.json");
     writeFileSync(cov, JSON.stringify({ results: { summary: { extra: { executionDetails: [{ coverageMetrics: { coveredOperations: 19, totalOperationsWithFilters: 21 } }] } } } }));
-    const base = ["--project", "demo", "--run-key", "k", "--dry-run"];
+    const base = ["--spec-id", "sp1", "--run-key", "k", "--dry-run"];
     await run([...base, "--file", junitFile(), "--kind", "contract", "--tool", "specmatic", "--coverage-report", cov]);
     expect(JSON.parse(stdout.join("")).payload.suite.metrics).toEqual({ coverage_pct: 90.5 });
     expect(stderr.join("")).toContain("API coverage 90.5% (19/21 operations)");
@@ -255,54 +251,24 @@ describe("nb assurance report upload", () => {
     await expect(run([...base, "--file", junitFile(), "--kind", "contract", "--tool", "specmatic", "--coverage-report", join(dir, "nope.json")])).rejects.toThrow(/File not found/);
   });
 
-  it("--api-version labels the result and leaves the components alone: the version is part of the identity next to them", async () => {
+  it("a result has no API version of its own: nothing api_version is sent, and the retired NB_API_VERSION is ignored with a warning", async () => {
     stubApi(null);
-    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "contract", "--tool", "specmatic"];
-    await run([...base, "--file", junitFile(), "--api-version", "v2", "--component", "backend-provider"]);
-    expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ api_version: "v2", components: ["backend-provider"] });
+    const args = ["--spec-id", "sp1", "--run-key", "k", "--dry-run", "--kind", "contract", "--tool", "specmatic", "--file", junitFile()];
+    await run(args);
+    expect(JSON.parse(stdout.join("")).payload.suite).not.toHaveProperty("api_version");
+    expect(stderr.join("")).not.toContain("NB_API_VERSION");
     stdout.length = 0;
-    await run([...base, "--file", junitFile(), "--api-version", "v2"]);
-    const noComponent = JSON.parse(stdout.join("")).payload.suite;
-    expect(noComponent.api_version).toBe("v2");
-    expect(noComponent.components).toBeUndefined();
-    stdout.length = 0;
-    // no version: nothing is added, the result holds for every version
-    await run([...base, "--file", junitFile()]);
-    expect(JSON.parse(stdout.join("")).payload.suite.api_version).toBeUndefined();
-  });
-
-  it("NB_API_VERSION is the default for --api-version; the flag wins, and an empty variable is none", async () => {
-    stubApi(null);
-    const args = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "contract", "--tool", "specmatic", "--file", junitFile()];
     vi.stubEnv("NB_API_VERSION", "v3");
     await run(args);
-    expect(JSON.parse(stdout.join("")).payload.suite.api_version).toBe("v3");
-    stdout.length = 0;
-    await run([...args, "--api-version", "v4"]);
-    expect(JSON.parse(stdout.join("")).payload.suite.api_version).toBe("v4");
-    stdout.length = 0;
-    vi.stubEnv("NB_API_VERSION", "");
-    await run(args);
-    expect(JSON.parse(stdout.join("")).payload.suite.api_version).toBeUndefined();
-    vi.stubEnv("NB_API_VERSION", "v 1");
-    await expect(run(args)).rejects.toThrow(/NB_API_VERSION 'v 1' is not a version label/);
-  });
-
-  it("--component is repeatable: a result may be about several components", async () => {
-    stubApi(null);
-    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "e2e", "--tool", "playwright", "--file", junitFile()];
-    await run([...base, "--component", "frontend", "--component", " backend ", "--component", "Frontend"]);
-    expect(JSON.parse(stdout.join("")).payload.suite.components).toEqual(["frontend", "backend"]); // trimmed, no duplicate ignoring case
-    stdout.length = 0;
-    await run(base);
-    expect(JSON.parse(stdout.join("")).payload.suite.components).toBeUndefined(); // the API names it `default`
+    expect(JSON.parse(stdout.join("")).payload.suite).not.toHaveProperty("api_version");
+    expect(stderr.join("")).toMatch(/NB_API_VERSION is retired and ignored/);
   });
 
   it("--label tells apart two scans of one tool: sent trimmed, left out when not given, refused when empty or too long", async () => {
     stubApi(null);
-    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "security", "--tool", "zap", "--file", junitFile(), "--component", "frontend"];
+    const base = ["--spec-id", "sp1", "--run-key", "k", "--dry-run", "--kind", "security", "--tool", "zap", "--file", junitFile()];
     await run([...base, "--label", " full-scan "]);
-    expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ components: ["frontend"], label: "full-scan" });
+    expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ label: "full-scan" });
     stdout.length = 0;
     await run(base);
     expect(JSON.parse(stdout.join("")).payload.suite.label).toBeUndefined();
@@ -312,7 +278,7 @@ describe("nb assurance report upload", () => {
 
   it("--tool-version records the version of the tool: sent trimmed, left out when not given, refused when empty or too long", async () => {
     stubApi(null);
-    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "unit", "--tool", "pytest", "--file", junitFile()];
+    const base = ["--spec-id", "sp1", "--run-key", "k", "--dry-run", "--kind", "unit", "--tool", "pytest", "--file", junitFile()];
     await run([...base, "--tool-version", " 9.1.0 "]);
     expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ tool: "pytest", tool_version: "9.1.0" });
     stdout.length = 0;
@@ -324,7 +290,7 @@ describe("nb assurance report upload", () => {
 
   it("--spec-hash records the contract the result was produced against: sent as spec_hash (lower-cased), left out when not given, refused unless 64 hex characters", async () => {
     stubApi(null);
-    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "contract", "--tool", "specmatic", "--file", junitFile()];
+    const base = ["--spec-id", "sp1", "--run-key", "k", "--dry-run", "--kind", "contract", "--tool", "specmatic", "--file", junitFile()];
     const hash = "f2c098a7c93707864edb109c0839bdfe6f34d002c0322fe11bfc400fb4a782ff";
     await run([...base, "--spec-hash", ` ${hash.toUpperCase()} `]);
     expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ tool: "specmatic", spec_hash: hash });
@@ -338,7 +304,7 @@ describe("nb assurance report upload", () => {
 
   it("--contract-file sends the SHA-256 of the document, the one the catalog keeps as content_hash; it is exclusive with --spec-hash", async () => {
     stubApi(null);
-    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "contract", "--tool", "specmatic", "--file", junitFile()];
+    const base = ["--spec-id", "sp1", "--run-key", "k", "--dry-run", "--kind", "contract", "--tool", "specmatic", "--file", junitFile()];
     const contract = join(dir, "spec.yaml");
     const text = "openapi: 3.0.3\ninfo:\n  title: Demo\n  version: 1.0.0\npaths: {}\n";
     writeFileSync(contract, text);
@@ -349,21 +315,19 @@ describe("nb assurance report upload", () => {
     await expect(run([...base, "--contract-file", contract, "--spec-hash", expected])).rejects.toThrow(/exclusive/);
   });
 
-  it("--component refuses an empty or too long name and more than 20, and --suite is gone", async () => {
+  it("a result no longer has components of its own: the component is part of the repository's key (--component is that)", async () => {
     stubApi(null);
-    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "unit", "--tool", "vitest", "--file", junitFile()];
-    await expect(run([...base, "--component", "  "])).rejects.toThrow(/must not be empty/);
-    await expect(run([...base, "--component", "x".repeat(101)])).rejects.toThrow(/100 characters or fewer/);
-    const many = Array.from({ length: 21 }, (_, i) => ["--component", `c${i}`]).flat();
-    await expect(run([...base, ...many])).rejects.toThrow(/At most 20/);
     const flags = buildReportUploadCommand().options.map((o) => o.long);
     expect(flags).toContain("--component");
     expect(flags).not.toContain("--suite");
+    const base = ["--spec-id", "sp1", "--run-key", "k", "--dry-run", "--kind", "unit", "--tool", "vitest", "--file", junitFile()];
+    await run(base);
+    expect(JSON.parse(stdout.join("")).payload.suite.components).toBeUndefined();
   });
 
   it("--metric adds numbers to the suite, on top of what the report gave, and several can be repeated", async () => {
     stubApi(null);
-    const base = ["--project", "demo", "--run-key", "k", "--dry-run", "--kind", "security", "--tool", "zap", "--file", junitFile()];
+    const base = ["--spec-id", "sp1", "--run-key", "k", "--dry-run", "--kind", "security", "--tool", "zap", "--file", junitFile()];
     await run([...base, "--metric", "high=0", "--metric", "medium=3", "--metric", "low=2"]);
     expect(JSON.parse(stdout.join("")).payload.suite.metrics).toEqual({ high: 0, medium: 3, low: 2 });
     expect(stderr.join("")).toContain("metrics high=0 medium=3 low=2");
@@ -374,7 +338,7 @@ describe("nb assurance report upload", () => {
 
   it("refuses a malformed --metric before anything is sent", async () => {
     stubApi(null);
-    const base = ["--project", "demo", "--run-key", "k", "--kind", "security", "--tool", "zap", "--file", junitFile()];
+    const base = ["--spec-id", "sp1", "--run-key", "k", "--kind", "security", "--tool", "zap", "--file", junitFile()];
     for (const bad of ["high", "high=", "High=1", "high=abc", "1high=2", "=3"]) {
       await expect(run([...base, "--metric", bad])).rejects.toThrow(/--metric/);
     }
@@ -383,23 +347,23 @@ describe("nb assurance report upload", () => {
     expect(() => parseMetrics(Array.from({ length: 21 }, (_, i) => `k${i}=1`))).toThrow(/At most 20/);
   });
 
-  it("refuses a version that is not a label before anything is sent", async () => {
+  it("--api-version is part of the spec's key (not a result label): a bad one is refused before anything is sent, and it cannot be combined with --spec-id", async () => {
     stubApi(null);
-    await expect(run(["--project", "demo", "--run-key", "k", "--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--api-version", "v 1"])).rejects.toThrow(/not a version label/);
-    expect(calls).toHaveLength(0);
-    expect(checkApiVersion(" v1 ")).toBe("v1");
-    expect(() => checkApiVersion("x".repeat(33))).toThrow();
+    await expect(run(["--repository", "acme/api", "--spec", "Account API", "--api-version", "v 1", "--run-key", "k", "--file", junitFile(), "--kind", "unit", "--tool", "vitest"])).rejects.toThrow(/--api-version 'v 1' must be a version label/);
+    await expect(run(["--spec-id", "sp1", "--api-version", "v1", "--run-key", "k", "--file", junitFile(), "--kind", "unit", "--tool", "vitest"])).rejects.toThrow(/do not combine/);
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
   });
 
   it("explains missing or invalid inputs", async () => {
     stubApi(null);
-    const base = ["--project", "demo", "--run-key", "k"];
+    const base = ["--spec-id", "sp1", "--run-key", "k"];
     await expect(run([...base])).rejects.toThrow(/--file/);
     await expect(run([...base, "--file", join(dir, "nope.xml"), "--kind", "unit", "--tool", "x"])).rejects.toThrow(/File not found/);
     await expect(run([...base, "--file", junitFile(), "--tool", "x"])).rejects.toThrow(/--kind is required/);
     await expect(run([...base, "--file", junitFile(), "--kind", "unit"])).rejects.toThrow(/--tool is required/);
     await expect(run([...base, "--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--status", "ok"])).rejects.toThrow(/--status/);
-    await expect(run(["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--run-key", "k"])).rejects.toThrow(/project name/);
+    vi.stubEnv("NB_SPEC_ID", "");
+    await expect(run(["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--run-key", "k"])).rejects.toThrow(/Say which spec/);
     const txt = join(dir, "r.txt");
     writeFileSync(txt, "x");
     await expect(run([...base, "--file", txt, "--kind", "unit", "--tool", "x"])).rejects.toThrow(/--format/);
@@ -427,105 +391,240 @@ describe("checkSuite", () => {
 
 describe("upload tool label", () => {
   it("fails before reading or sending anything when the tool is not a label", async () => {
-    await expect(run(["--file", junitFile(), "--kind", "unit", "--tool", "not a label", "--project", "demo", "--run-key", "k"])).rejects.toThrow(/not a label/);
+    await expect(run(["--file", junitFile(), "--kind", "unit", "--tool", "not a label", "--spec-id", "sp1", "--run-key", "k"])).rejects.toThrow(/not a label/);
     expect(calls).toHaveLength(0);
   });
 
   it("sends a tool the platform has never heard of, with its cases", async () => {
     stubApi(null);
-    await run(["--file", junitFile(), "--kind", "security", "--tool", "trivy", "--project", "demo", "--run-key", "k", "--dry-run"]);
+    await run(["--file", junitFile(), "--kind", "security", "--tool", "trivy", "--spec-id", "sp1", "--run-key", "k", "--dry-run"]);
     const suite = JSON.parse(stdout.join("")).payload.suite;
     expect(suite).toMatchObject({ kind: "security", tool: "trivy" });
     expect(suite.cases).toHaveLength(2);
   });
 });
 
-describe("sending to a project by id", () => {
+describe("the spec to report to", () => {
   const base = () => ["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--run-key", "k"];
 
-  it("--project-id skips the lookup and the creation, and posts straight to that project", async () => {
-    stubApi(null);
-    await run([...base(), "--project-id", "p1abc", "--project", "renamed"]);
-    expect(calls.map((c) => `${c.method} ${c.url.pathname}`)).toEqual(["POST /api/v1/projects/p1abc/results"]);
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ project_id: "p1abc", project_created: false });
-    expect(stderr.join("")).toContain("--project is ignored");
-    expect(stderr.join("")).toContain("id p1abc");
-    expect(stderr.join("")).not.toContain("Pin it"); // already pinned: no nudge
+  it("--spec-id reads the spec and its repository from the catalog and posts to the spec, naming both in the result", async () => {
+    stubApi();
+    await run([...base(), "--spec-id", "sp1"]);
+    expect(calls.map((c) => `${c.method} ${c.url.host}${c.url.pathname}`)).toEqual(["GET specs.test/api/v1/specs/sp1", "GET specs.test/api/v1/repositories/rp1", "POST api.test/api/v1/specs/sp1/results"]);
+    expect(calls[2].body.repository_id).toBe("rp1");
+    expect(JSON.parse(stdout.join(""))).toMatchObject({ spec_id: "sp1", repository_id: "rp1" });
+    expect(stderr.join("")).toContain("spec Target API (github nasebanal/nb-target-api), id sp1");
   });
 
-  it("reads NB_ASSURANCE_PROJECT_ID, and needs no project name then", async () => {
-    stubApi(null);
-    vi.stubEnv("NB_ASSURANCE_PROJECT_ID", "envproj");
+  it("reads NB_SPEC_ID, and the flag wins over it", async () => {
+    stubApi({}, { specs: [{ id: "envspec", name: "E", repository_id: "rp1" }, { id: "flagspec", name: "F", repository_id: "rp1" }] });
+    vi.stubEnv("NB_SPEC_ID", "envspec");
     await run(base());
-    expect(calls.map((c) => c.url.pathname)).toEqual(["/api/v1/projects/envproj/results"]);
+    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/specs/envspec/results");
+    calls.length = 0;
+    await run([...base(), "--spec-id", "flagspec"]);
+    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/specs/flagspec/results");
   });
 
-  it("the flag wins over the environment", async () => {
-    stubApi(null);
-    vi.stubEnv("NB_ASSURANCE_PROJECT_ID", "envproj");
-    await run([...base(), "--project-id", "flagproj"]);
-    expect(calls[0].url.pathname).toBe("/api/v1/projects/flagproj/results");
+  it("by names: --repository, an optional --component and --spec are checked against each other and resolve to the spec", async () => {
+    stubApi(null, {
+      repositories: [
+        { id: "r-whole", provider: "github", name: "Acme/Billing", component: "" },
+        { id: "r-web", provider: "github", name: "Acme/Billing", component: "web" },
+      ],
+      specs: [{ id: "s-api", name: "Billing API", repository_id: "r-whole" }, { id: "s-web", name: "Billing Web", repository_id: "r-web" }],
+    });
+    await run([...base(), "--repository", "acme/billing", "--spec", "billing api"]);
+    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/specs/s-api/results");
+    expect(calls.at(-1)!.body.repository_id).toBe("r-whole");
+    calls.length = 0;
+    await run([...base(), "--repository", "acme/billing", "--component", "web", "--spec", "Billing Web"]);
+    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/specs/s-web/results");
+    expect(calls.at(-1)!.body.repository_id).toBe("r-web");
+    // nothing is registered by a report
+    expect(calls.every((c) => c.method === "GET" || c.url.pathname.endsWith("/results"))).toBe(true);
+    // the spec belongs to another row: an error naming both
+    await expect(run([...base(), "--repository", "acme/billing", "--component", "web", "--spec", "Billing API"])).rejects.toThrow(/No spec named 'Billing API' in no group \/ github Acme\/Billing \/ web.*exists in:/s);
   });
 
-  it("an unknown id is an error naming the id, never a new project", async () => {
+  it("a names ask wins over the id the variable carries, and a spec with no repository is refused", async () => {
+    stubApi(null, { repositories: [{ id: "r1", provider: "github", name: "acme/api", component: "" }], specs: [{ id: "s1", name: "Api", repository_id: "r1" }, { id: "s2", name: "Loose", repository_id: null }] });
+    vi.stubEnv("NB_SPEC_ID", "sp-other");
+    await run([...base(), "--repository", "acme/api", "--spec", "Api"]);
+    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/specs/s1/results");
+    calls.length = 0;
+    await expect(run([...base(), "--spec-id", "s2"])).rejects.toThrow(/tied to no repository/);
+    expect(calls.some((c) => c.url.host === "api.test")).toBe(false);
+  });
+
+  it("refuses to run with neither, saying how, before anything is sent; the retired NB_REPOSITORY_ID gets its own message", async () => {
+    stubApi();
+    vi.stubEnv("NB_SPEC_ID", "");
+    await expect(run(base())).rejects.toThrow(/Say which spec/);
+    vi.stubEnv("NB_REPOSITORY_ID", "oldrepo");
+    await expect(run(base())).rejects.toThrow(/NB_REPOSITORY_ID is retired.*NB_SPEC_ID/);
+    // with the new target given, the old variable is just ignored
+    await run([...base(), "--spec-id", "sp1"]);
+    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/specs/sp1/results");
+  });
+
+  it("refuses an id and names together, half the names, a provider without a name and an id that cannot be one, before anything is sent", async () => {
+    stubApi();
+    await expect(run([...base(), "--spec-id", "a1", "--repository", "a/b", "--spec", "x"])).rejects.toThrow(/do not combine/);
+    await expect(run([...base(), "--repository", "a/b"])).rejects.toThrow(/--spec is required/);
+    await expect(run([...base(), "--spec", "x"])).rejects.toThrow(/--repository is required/);
+    await expect(run([...base(), "--repository-provider", "gitlab"])).rejects.toThrow(/needs --repository/);
+    await expect(run([...base(), "--spec-id", "../x"])).rejects.toThrow(/not a spec id/);
+    await expect(run([...base(), "--repository", "a/b", "--spec", "x", "--repository-provider", "svn"])).rejects.toThrow(/provider/);
+    await expect(run([...base(), "--repository-id", "rp1"])).rejects.toThrow(/--repository-id is retired/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("an id the catalog does not have is an error naming the id; Assurance's 404 and 422 are explained, other errors pass on", async () => {
+    stubApi();
+    await expect(run([...base(), "--spec-id", "nope"])).rejects.toThrow(/No spec with id 'nope'/);
     stubApi(null, { resultsStatus: 404 });
-    await expect(run([...base(), "--project-id", "nope"])).rejects.toThrow(/No project with id 'nope'/);
-    expect(calls.map((c) => c.method + " " + c.url.pathname)).toEqual(["POST /api/v1/projects/nope/results"]);
-  });
-
-  it("other API errors with an id are passed on as they are", async () => {
+    await expect(run([...base(), "--spec-id", "sp1"])).rejects.toThrow(/No spec with id 'sp1'/);
+    stubApi(null, { resultsStatus: 422, resultsError: { code: "REPOSITORY_MISMATCH", message: "the spec is tied to another repository" } });
+    await expect(run([...base(), "--spec-id", "sp1"])).rejects.toThrow(/refused the result \(REPOSITORY_MISMATCH\)/);
     stubApi(null, { resultsStatus: 400 });
-    await expect(run([...base(), "--project-id", "p1"])).rejects.not.toThrow(/No project with id/);
+    await expect(run([...base(), "--spec-id", "sp1"])).rejects.not.toThrow(/No spec with id/);
   });
 
-  it("refuses an id that cannot be one, before anything is sent", async () => {
-    stubApi(null);
-    await expect(run([...base(), "--project-id", "../x"])).rejects.toThrow(/not a project id/);
+  it("--dry-run by id calls nothing; by names it only reads the catalog and shows the spec and the repository", async () => {
+    stubApi();
+    await run([...base(), "--spec-id", "sp1", "--dry-run"]);
     expect(calls).toHaveLength(0);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({ spec_id: "sp1" });
+    stdout.length = 0;
+    await run([...base(), "--repository", "nasebanal/nb-target-api", "--spec", "Target API", "--dry-run"]);
+    const shown = JSON.parse(stdout.join(""));
+    expect(shown.spec).toEqual({ id: "sp1", name: "Target API" });
+    expect(shown.repository.id).toBe("rp1");
+    expect(shown.payload.repository_id).toBe("rp1");
+    expect(calls.every((c) => c.method === "GET")).toBe(true);
   });
 
-  it("an upload by name tells how to pin the project, and prints the id", async () => {
-    stubApi({ id: "p9" });
-    await run([...base(), "--project", "demo"]);
-    expect(stderr.join("")).toContain("--project-id p9");
-    expect(stderr.join("")).toContain("NB_ASSURANCE_PROJECT_ID=p9");
+  it("--org goes to the catalog and to Assurance as the active organization; `personal` is not sent to Assurance", async () => {
+    stubApi();
+    await run([...base(), "--org", "7"]);
+    expect(calls.map((c) => c.org)).toEqual(["7", "7", "7"]);
+    calls.length = 0;
+    await run([...base(), "--org", "personal"]);
+    expect(calls.at(-1)!.org).toBeUndefined();
+    await expect(run([...base(), "--org", "acme"])).rejects.toThrow(/organization id/);
   });
 
-  it("--dry-run shows the id it would use", async () => {
-    stubApi(null);
-    await run([...base(), "--project-id", "p1", "--dry-run"]);
-    expect(calls).toHaveLength(0);
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ project_id: "p1" });
-  });
-
-  it("writes project_id to GITHUB_OUTPUT when Actions provides one", async () => {
-    stubApi({ id: "p9" });
+  it("writes spec_id and repository_id to GITHUB_OUTPUT when Actions provides one, and does not fail when it cannot", async () => {
+    stubApi();
     const out = join(dir, "gh-output");
     writeFileSync(out, "");
     vi.stubEnv("GITHUB_OUTPUT", out);
-    await run([...base(), "--project", "demo"]);
-    expect(readFileSync(out, "utf8")).toBe("project_id=p9\n");
-  });
-
-  it("does not fail the upload when GITHUB_OUTPUT cannot be written", async () => {
-    stubApi({ id: "p9" });
+    await run([...base(), "--spec-id", "sp1"]);
+    expect(readFileSync(out, "utf8")).toBe("spec_id=sp1\nrepository_id=rp1\n");
     vi.stubEnv("GITHUB_OUTPUT", join(dir, "no-such-dir", "out"));
-    await run([...base(), "--project", "demo"]);
-    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/projects/p9/results");
+    await run([...base(), "--spec-id", "sp1"]);
+    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/specs/sp1/results");
   });
 
-  it("checkProjectId trims, treats empty as none, and refuses what is not an id", () => {
-    expect(checkProjectId(" abc123 ")).toBe("abc123");
-    expect(checkProjectId("")).toBeUndefined();
-    expect(checkProjectId(undefined)).toBeUndefined();
-    expect(() => checkProjectId("a b")).toThrow();
-    expect(() => checkProjectId("a/b")).toThrow();
-    expect(() => checkProjectId("x".repeat(65))).toThrow();
+  it("the old project options are gone", async () => {
+    stubApi();
+    for (const flag of [["--project", "demo"], ["--project-id", "p1"], ["--spec-file", "x.yaml"], ["--repo", "a/b"], ["--no-create-project"], ["--no-create"]]) {
+      await expect(run([...base(), ...flag])).rejects.toThrow(/unknown option/);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("checkSpecId trims, treats empty as none, and refuses what is not an id; specRefOf is the one place that decides", () => {
+    expect(checkSpecId(" abc123 ")).toBe("abc123");
+    expect(checkSpecId("")).toBeUndefined();
+    expect(checkSpecId(undefined)).toBeUndefined();
+    expect(() => checkSpecId("a b")).toThrow();
+    expect(() => checkSpecId("a/b")).toThrow();
+    expect(() => checkSpecId("x".repeat(65))).toThrow();
+    expect(specRefOf({}, { NB_SPEC_ID: "e1" })).toEqual({ specId: "e1" });
+    expect(specRefOf({ specId: "f1" }, { NB_SPEC_ID: "e1" })).toEqual({ specId: "f1" });
+    expect(specRefOf({ repository: "a/b", spec: "S" }, { NB_SPEC_ID: "e1" })).toMatchObject({ repository: "a/b", spec: "S" });
+  });
+});
+
+describe("environments: the group is part of the spec's key, and --all-specs", () => {
+  const repo = { id: "rp1", provider: "github", name: "acme/api", component: "" };
+  const groups = [{ id: "g-prod", name: "Production" }, { id: "g-stg", name: "Staging" }];
+  const specs = [
+    { id: "s-prod", name: "Account API", repository_id: "rp1", group_id: "g-prod" },
+    { id: "s-stg", name: "Account API", repository_id: "rp1", group_id: "g-stg" },
+  ];
+  const base = () => ["--file", junitFile(), "--kind", "contract", "--tool", "specmatic", "--run-key", "k"];
+
+  it("--group picks the spec of that environment; without it a name that exists only in groups is an error that lists them", async () => {
+    stubApi(null, { repositories: [repo], specs, groups });
+    await run([...base(), "--repository", "acme/api", "--group", "Staging", "--spec", "Account API"]);
+    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/specs/s-stg/results");
+    await expect(run([...base(), "--repository", "acme/api", "--spec", "Account API"])).rejects.toThrow(/No spec named 'Account API' in no group.*group 'Production'.*group 'Staging'.*--group/s);
+    await expect(run([...base(), "--spec-id", "s-prod", "--group", "Production"])).rejects.toThrow(/do not combine/);
+  });
+
+  it("--all-specs sends a source-level result to every spec of the repository, one line each", async () => {
+    stubApi(null, { repositories: [repo], specs, groups });
+    await run(["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--run-key", "k", "--repository", "acme/api", "--all-specs"]);
+    expect(calls.filter((c) => c.method === "POST").map((c) => c.url.pathname)).toEqual(["/api/v1/specs/s-prod/results", "/api/v1/specs/s-stg/results"]);
+    expect(calls.filter((c) => c.method === "POST").every((c) => c.body.repository_id === "rp1")).toBe(true);
+    expect(JSON.parse(stdout.join("")).results).toHaveLength(2);
+    expect(stderr.join("").match(/-> spec /g)).toHaveLength(2);
+  });
+
+  it("--all-specs is refused for a result that is about one deployed environment, and combined with a spec", async () => {
+    stubApi(null, { repositories: [repo], specs, groups });
+    await expect(run([...base(), "--repository", "acme/api", "--all-specs"])).rejects.toThrow(/--all-specs is for results that belong to the source.*--kind contract/s);
+    const unit = ["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--run-key", "k"];
+    await expect(run([...unit, "--all-specs"])).rejects.toThrow(/needs --repository/);
+    await expect(run([...unit, "--repository", "acme/api", "--all-specs", "--spec", "Account API"])).rejects.toThrow(/do not combine/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("--all-specs --dry-run lists the specs it would send to and writes nothing", async () => {
+    stubApi(null, { repositories: [repo], specs, groups });
+    await run(["--file", junitFile(), "--kind", "security", "--tool", "trivy", "--run-key", "k", "--repository", "acme/api", "--all-specs", "--dry-run"]);
+    expect(JSON.parse(stdout.join("")).specs.map((x: { id: string }) => x.id)).toEqual(["s-prod", "s-stg"]);
+    expect(calls.every((c) => c.method === "GET")).toBe(true);
+  });
+});
+
+describe("API versions: one spec per API version, --api-version is part of the key", () => {
+  const repo = { id: "rp1", provider: "github", name: "acme/api", component: "" };
+  const groups = [{ id: "g-prod", name: "Production" }, { id: "g-stg", name: "Staging" }];
+  const specs = [
+    { id: "s-v1-prod", name: "Account API", repository_id: "rp1", group_id: "g-prod", api_version: "v1" },
+    { id: "s-v2-prod", name: "Account API", repository_id: "rp1", group_id: "g-prod", api_version: "v2" },
+    { id: "s-v1-stg", name: "Account API", repository_id: "rp1", group_id: "g-stg", api_version: "v1" },
+  ];
+  const base = () => ["--file", junitFile(), "--kind", "contract", "--tool", "specmatic", "--run-key", "k", "--repository", "acme/api", "--spec", "Account API"];
+
+  it("--api-version picks the spec of that API version; left out, a name that exists at several is an error that lists them", async () => {
+    stubApi(null, { repositories: [repo], specs, groups });
+    await run([...base(), "--group", "Production", "--api-version", "v2"]);
+    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/specs/s-v2-prod/results");
+    await expect(run([...base(), "--group", "Production"])).rejects.toThrow(/more than one API version.*v1, v2.*--api-version/s);
+    // one API version only in that group: it is the one
+    calls.length = 0;
+    await run([...base(), "--group", "Staging"]);
+    expect(calls.at(-1)!.url.pathname).toBe("/api/v1/specs/s-v1-stg/results");
+  });
+
+  it("--all-specs feeds one API version only: a release branch does not feed the other; several versions need --api-version", async () => {
+    stubApi(null, { repositories: [repo], specs, groups });
+    const unit = ["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--run-key", "k", "--repository", "acme/api", "--all-specs"];
+    await expect(run(unit)).rejects.toThrow(/several API versions \(v1, v2\).*--api-version/s);
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
+    await run([...unit, "--api-version", "v1"]);
+    expect(calls.filter((c) => c.method === "POST").map((c) => c.url.pathname)).toEqual(["/api/v1/specs/s-v1-prod/results", "/api/v1/specs/s-v1-stg/results"]);
+    await expect(run([...unit, "--api-version", "v3"])).rejects.toThrow(/No spec of github acme\/api is at API version 'v3'.*v1, v2/s);
   });
 });
 
 describe("the link to the report in the repository", () => {
-  const base = () => ["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--project", "demo", "--run-key", "k"];
+  const base = () => ["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--spec-id", "sp1", "--run-key", "k"];
 
   it("--provider is sent, and refused when it is not github, gitlab or other", async () => {
     stubApi({ id: "p1" });
@@ -576,19 +675,19 @@ describe("the link to the report in the repository", () => {
     git("commit", "-q", "-m", "report");
     const sha = git("rev-parse", "HEAD");
     stubApi({ id: "p1" });
-    await run(["--file", join(dir, "reports", "junit.xml"), "--kind", "unit", "--tool", "vitest", "--project", "demo", "--run-key", "k", "--commit", sha]);
+    await run(["--file", join(dir, "reports", "junit.xml"), "--kind", "unit", "--tool", "vitest", "--spec-id", "sp1", "--run-key", "k", "--commit", sha]);
     expect(calls.at(-1)!.body.suite.report_path).toBe("reports/junit.xml");
 
     // the same file, edited after the commit: the link would not show what was reported
     calls = [];
     writeFileSync(join(dir, "reports", "junit.xml"), JUNIT + " ");
-    await run(["--file", join(dir, "reports", "junit.xml"), "--kind", "unit", "--tool", "vitest", "--project", "demo", "--run-key", "k", "--commit", sha]);
+    await run(["--file", join(dir, "reports", "junit.xml"), "--kind", "unit", "--tool", "vitest", "--spec-id", "sp1", "--run-key", "k", "--commit", sha]);
     expect(calls.at(-1)!.body.suite).not.toHaveProperty("report_path");
   });
 });
 
 describe("--attach: keeping the tool's own report with the result", () => {
-  const base = () => ["--file", junitFile(), "--kind", "e2e", "--tool", "playwright", "--project", "demo", "--run-key", "k"];
+  const base = () => ["--file", junitFile(), "--kind", "e2e", "--tool", "playwright", "--spec-id", "sp1", "--run-key", "k"];
 
   it("sends a file as it is, after the result, to the suite that result made", async () => {
     stubApi({ id: "p9" });
@@ -596,14 +695,15 @@ describe("--attach: keeping the tool's own report with the result", () => {
     writeFileSync(report, "<html>the report</html>");
     await run([...base(), "--attach", report]);
     expect(calls.map((c) => `${c.method} ${c.url.pathname}${c.url.search}`)).toEqual([
-      "GET /api/v1/projects?name=demo",
-      "POST /api/v1/projects/p9/results",
-      "PUT /api/v1/projects/p9/runs/run1/suites/suite1/attachment?name=report.html",
+      "GET /api/v1/specs/sp1",
+      "GET /api/v1/repositories/rp1",
+      "POST /api/v1/specs/sp1/results",
+      "PUT /api/v1/specs/sp1/runs/run1/suites/suite1/attachment?name=report.html",
     ]);
     const put = calls.at(-1)!;
     expect(Buffer.from(put.bytes!).toString()).toBe("<html>the report</html>");
     expect(put.contentType).toBe("application/octet-stream");
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ project_id: "p9", attachment: { name: "report.html", size_bytes: 23 } });
+    expect(JSON.parse(stdout.join(""))).toMatchObject({ repository_id: "rp1", attachment: { name: "report.html", size_bytes: 23 } });
     expect(stderr.join("")).toContain("attached report.html");
   });
 
@@ -644,7 +744,7 @@ describe("--attach: keeping the tool's own report with the result", () => {
     const report = join(dir, "report.html");
     writeFileSync(report, "x");
     await expect(run([...base(), "--attach", report])).rejects.toThrow(/The result was reported, but the attached report was not kept: An attachment can be at most/);
-    expect(calls.map((c) => c.method + " " + c.url.pathname)).toContain("POST /api/v1/projects/p9/results");
+    expect(calls.map((c) => c.method + " " + c.url.pathname)).toContain("POST /api/v1/specs/sp1/results");
   });
 
   it("--dry-run reads and measures it, and sends nothing", async () => {
@@ -654,268 +754,5 @@ describe("--attach: keeping the tool's own report with the result", () => {
     await run([...base(), "--attach", report, "--dry-run"]);
     expect(calls).toHaveLength(0);
     expect(JSON.parse(stdout.join(""))).toMatchObject({ attachment: { name: "report.html", size_bytes: 5 } });
-  });
-});
-
-describe("--spec-id: tying the project to an API of the catalog", () => {
-  const base = () => ["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--project", "demo", "--run-key", "k"];
-  const patches = () => calls.filter((c) => c.method === "PATCH");
-
-  it("creates a new project already linked, with no second call", async () => {
-    stubApi(null);
-    await run([...base(), "--spec-id", "spec_1", "--spec-environment", "production"]);
-    expect(calls.find((c) => c.method === "POST" && c.url.pathname === "/api/v1/projects")!.body).toMatchObject({ name: "demo", spec_id: "spec_1", spec_environment: "production" });
-    expect(patches()).toHaveLength(0);
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ project_created: true, spec: { id: "spec_1", environment: "production", changed: true, was: null } });
-    expect(stderr.join("")).toContain("catalog spec_1 (production) (linked)");
-  });
-
-  it("links an existing project that has no link yet, after the result is in", async () => {
-    stubApi({ id: "p9", spec_id: null, spec_environment: null });
-    await run([...base(), "--spec-id", "spec_1"]);
-    expect(calls.map((c) => c.method + " " + c.url.pathname)).toEqual(["GET /api/v1/projects", "POST /api/v1/projects/p9/results", "PATCH /api/v1/projects/p9"]);
-    expect(patches()[0].body).toEqual({ spec_id: "spec_1" });
-    expect(stderr.join("")).toContain("catalog spec_1 (linked)");
-  });
-
-  it("writes nothing when the project is already linked to it: a pipeline on every commit leaves it alone", async () => {
-    stubApi({ id: "p9", spec_id: "spec_1", spec_environment: "production" });
-    await run([...base(), "--spec-id", "spec_1", "--spec-environment", "production"]);
-    expect(patches()).toHaveLength(0);
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ spec: { id: "spec_1", environment: "production", changed: false, was: "spec_1" } });
-    expect(stderr.join("")).toContain("(already linked)");
-  });
-
-  it("leaves the environment alone when none is given and the spec is the same", async () => {
-    stubApi({ id: "p9", spec_id: "spec_1", spec_environment: "staging" });
-    await run([...base(), "--spec-id", "spec_1"]);
-    expect(patches()).toHaveLength(0);
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ spec: { environment: "staging", changed: false } });
-  });
-
-  it("changes only the environment when the spec is the same and the environment differs", async () => {
-    stubApi({ id: "p9", spec_id: "spec_1", spec_environment: "staging" });
-    await run([...base(), "--spec-id", "spec_1", "--spec-environment", "production"]);
-    expect(patches()[0].body).toEqual({ spec_environment: "production" });
-  });
-
-  it("points the project at another spec, and says what it was", async () => {
-    stubApi({ id: "p9", spec_id: "old_spec", spec_environment: "production" });
-    await run([...base(), "--spec-id", "new_spec"]);
-    expect(patches()[0].body).toEqual({ spec_id: "new_spec" });
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ spec: { id: "new_spec", environment: null, changed: true, was: "old_spec" } });
-    expect(stderr.join("")).toContain("(changed from old_spec)");
-  });
-
-  it("with --project-id it reads the project once to compare, then writes only a difference", async () => {
-    stubApi({ id: "p9", spec_id: "spec_1", spec_environment: null });
-    await run(["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--run-key", "k", "--project-id", "p9", "--spec-id", "spec_1"]);
-    expect(calls.map((c) => c.method + " " + c.url.pathname)).toEqual(["POST /api/v1/projects/p9/results", "GET /api/v1/projects/p9"]);
-    expect(patches()).toHaveLength(0);
-  });
-
-  it("without --spec-id nothing about the catalog is read or written", async () => {
-    stubApi({ id: "p9", spec_id: "spec_1", spec_environment: null });
-    await run(base());
-    expect(patches()).toHaveLength(0);
-    expect(calls.map((c) => c.method + " " + c.url.pathname)).toEqual(["GET /api/v1/projects", "POST /api/v1/projects/p9/results"]);
-    expect(JSON.parse(stdout.join(""))).not.toHaveProperty("spec");
-  });
-
-  it("refuses an environment without a spec, and ids that cannot be one, before anything is sent", async () => {
-    stubApi(null);
-    await expect(run([...base(), "--spec-environment", "production"])).rejects.toThrow(/needs --spec-id/);
-    await expect(run([...base(), "--spec-id", "../x"])).rejects.toThrow(/not a catalog spec id/);
-    await expect(run([...base(), "--spec-id", "spec_1", "--spec-environment", " "])).rejects.toThrow(/1 to 40/);
-    await expect(run([...base(), "--spec-id", "spec_1", "--spec-environment", "x".repeat(41)])).rejects.toThrow(/1 to 40/);
-    expect(calls).toHaveLength(0);
-  });
-
-  it("--dry-run shows the link it would make and writes nothing", async () => {
-    stubApi(null);
-    await run([...base(), "--spec-id", "spec_1", "--dry-run"]);
-    expect(calls).toHaveLength(0);
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ spec: { id: "spec_1" } });
-  });
-
-  it("keeps the result when the link is refused, and says so with the server's reason", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: URL, init: RequestInit) => {
-        const url = new URL(String(input));
-        calls.push({ method: String(init.method), url, body: init.body ? JSON.parse(String(init.body)) : undefined });
-        const json = (status: number, data: unknown) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
-        if (init.method === "GET") return json(200, { success: true, data: { data: [{ id: "p9", spec_id: null, spec_environment: null }], total: 1, limit: 20 } });
-        if (init.method === "PATCH") return json(400, { success: false, error: { code: "VALIDATION_ERROR", message: "spec_id is not a valid id" } });
-        return json(201, { success: true, data: { run_id: "run1", suite_id: "suite1", replaced: false } });
-      }),
-    );
-    await expect(run([...base(), "--spec-id", "spec_1"])).rejects.toThrow(/The result was reported, but the project could not be linked to the catalog: spec_id is not a valid id/);
-    expect(calls.map((c) => c.method + " " + c.url.pathname)).toContain("POST /api/v1/projects/p9/results");
-  });
-
-  it("checkSpecId and checkSpecEnvironment trim, and refuse what is not one", () => {
-    expect(checkSpecId(" abc_1-2 ")).toBe("abc_1-2");
-    expect(() => checkSpecId("a b")).toThrow();
-    expect(() => checkSpecId("")).toThrow();
-    expect(checkSpecEnvironment(" production ")).toBe("production");
-  });
-});
-
-describe("--spec-file: the catalog, the project and the result in one command", () => {
-  const DOC = "openapi: 3.0.3\ninfo:\n  title: Billing API\n  version: 1.0.0\npaths: {}\n";
-  const base = () => ["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--project", "demo", "--run-key", "k"];
-
-  /** Two services behind one fetch: the catalog (specs.test) and Assurance (api.test). */
-  function both(opts: { catalogSpecs?: { id: string; name: string; group_id: string | null; latest_version: number; hash?: string }[]; catalogFail?: boolean; project?: { id: string; spec_id?: string | null; spec_environment?: string | null } | null } = {}) {
-    vi.stubEnv("NB_SPECS_BASE_URL", "http://specs.test");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: URL, init: RequestInit) => {
-        const url = new URL(String(input));
-        const method = String(init.method);
-        const body = init.body ? JSON.parse(String(init.body)) : undefined;
-        calls.push({ method, url, body, org: (init.headers as Record<string, string>)["X-Active-Organization-Id"] });
-        const json = (status: number, data: unknown) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
-        if (url.host === "specs.test") {
-          if (opts.catalogFail) return json(409, { success: false, error: { code: "LIMIT_REACHED", message: "A personal account can hold 3 specs" } });
-          const specs = opts.catalogSpecs ?? [];
-          if (method === "GET" && url.pathname === "/api/v1/specs") return json(200, { success: true, data: { data: specs, total: specs.length, limit: 3 } });
-          const versions = url.pathname.match(/^\/api\/v1\/specs\/([^/]+)\/versions$/);
-          if (versions && method === "GET") {
-            const hit = specs.find((s) => s.id === versions[1])!;
-            return json(200, { success: true, data: { data: [{ version: hit.latest_version, content_hash: hit.hash }], total: 1 } });
-          }
-          if (method === "GET" && url.pathname === "/api/v1/groups") return json(200, { success: true, data: { data: [], total: 0, limit: 10 } });
-          if (method === "POST" && url.pathname === "/api/v1/groups") return json(201, { success: true, data: { id: "g-new", name: body.name } });
-          if (method === "POST" && url.pathname === "/api/v1/specs") return json(201, { success: true, data: { id: "spec9", name: body.name, group_id: body.group_id ?? null } });
-          return json(500, { success: false, error: { code: "X", message: `${method} ${url.pathname}` } });
-        }
-        if (method === "GET") {
-          const hit = opts.project === undefined ? null : opts.project;
-          return json(200, { success: true, data: { data: hit ? [hit] : [], total: hit ? 1 : 0, limit: 20 } });
-        }
-        if (method === "PATCH") return json(200, { success: true, data: { id: "patched" } });
-        if (url.pathname === "/api/v1/projects") return json(201, { success: true, data: { id: "new1" } });
-        return json(201, { success: true, data: { run_id: "run1", suite_id: "suite1", replaced: false } });
-      }),
-    );
-  }
-  const specFile = () => {
-    const f = join(dir, "openapi.yaml");
-    writeFileSync(f, DOC);
-    return f;
-  };
-  const at = () => calls.map((c) => `${c.url.host} ${c.method} ${c.url.pathname}`);
-
-  it("registers the spec, creates the project already tied to it, and reports the result", async () => {
-    both();
-    await run([...base(), "--spec-file", specFile(), "--spec-environment", "production"]);
-    expect(at()).toEqual([
-      "specs.test GET /api/v1/specs",
-      "specs.test POST /api/v1/specs",
-      "api.test GET /api/v1/projects",
-      "api.test POST /api/v1/projects",
-      "api.test POST /api/v1/projects/new1/results",
-    ]);
-    expect(calls[1].body).toMatchObject({ name: "Billing API", content: DOC });
-    expect(calls[3].body).toMatchObject({ name: "demo", spec_id: "spec9", spec_environment: "production" });
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ project_created: true, catalog: { id: "spec9", action: "created" }, spec: { id: "spec9", changed: true } });
-    expect(stderr.join("")).toContain("spec Billing API v1 (created)");
-  });
-
-  it("changes nothing in the catalog or the project when the file and the link are already right", async () => {
-    both({ catalogSpecs: [{ id: "spec9", name: "Billing API", group_id: null, latest_version: 4, hash: hashOf(DOC) }], project: { id: "p9", spec_id: "spec9", spec_environment: null } });
-    await run([...base(), "--spec-file", specFile()]);
-    expect(calls.filter((c) => c.method === "POST" || c.method === "PATCH").map((c) => c.url.pathname)).toEqual(["/api/v1/projects/p9/results"]);
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ catalog: { action: "unchanged", version: 4 }, spec: { changed: false } });
-  });
-
-  it("reports the result even when the catalog refuses, then fails the command with the reason", async () => {
-    both({ catalogFail: true });
-    await expect(run([...base(), "--spec-file", specFile()])).rejects.toThrow(/The result was reported, but the spec could not be registered in the catalog \(the project is not tied to it\): .*A personal account can hold 3 specs/);
-    expect(calls.map((c) => `${c.url.host} ${c.method} ${c.url.pathname}`)).toContain("api.test POST /api/v1/projects/new1/results");
-    expect(calls.find((c) => c.method === "POST" && c.url.pathname === "/api/v1/projects")!.body).not.toHaveProperty("spec_id");
-  });
-
-  it("passes the name, the group (made when missing) and the organization on to the catalog, and nothing of it to Assurance", async () => {
-    both();
-    await run([...base(), "--spec-file", specFile(), "--spec-name", "Mine", "--spec-group", "Billing", "--spec-org", "7"]);
-    const create = calls.find((c) => c.method === "POST" && c.url.pathname === "/api/v1/specs")!;
-    expect(create.body).toMatchObject({ name: "Mine", group_id: "g-new" });
-    expect(calls.filter((c) => c.url.host === "specs.test").every((c) => c.org === "7")).toBe(true);
-    expect(calls.filter((c) => c.url.host === "api.test").every((c) => c.org === undefined)).toBe(true); // Assurance has no organization header from the CLI
-  });
-
-  it("refuses contradictory or orphaned options before anything is sent", async () => {
-    both();
-    await expect(run([...base(), "--spec-file", specFile(), "--spec-id", "x"])).rejects.toThrow(/exclusive/);
-    await expect(run([...base(), "--spec-name", "N"])).rejects.toThrow(/--spec-name needs --spec-file/);
-    await expect(run([...base(), "--spec-group", "G"])).rejects.toThrow(/--spec-group needs --spec-file/);
-    await expect(run([...base(), "--spec-org", "7"])).rejects.toThrow(/--spec-org needs --spec-file/);
-    await expect(run([...base(), "--spec-environment", "production"])).rejects.toThrow(/needs --spec-id or --spec-file/);
-    await expect(run([...base(), "--spec-file", join(dir, "missing.yaml")])).rejects.toThrow(/not found/);
-    await expect(run([...base(), "--spec-file", specFile(), "--spec-org", "acme"])).rejects.toThrow(/organization id/);
-    expect(calls).toHaveLength(0);
-  });
-
-  it("--dry-run reads the file and says what it would register, and calls nothing", async () => {
-    both();
-    await run([...base(), "--spec-file", specFile(), "--spec-group", "Billing", "--dry-run"]);
-    expect(calls).toHaveLength(0);
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ spec_file: { name: "Billing API", group: "Billing", content_hash: hashOf(DOC) } });
-  });
-
-  it("writes the spec id for the next step of a GitHub Actions job, next to the project id", async () => {
-    both();
-    const out = join(dir, "gh-output");
-    writeFileSync(out, "");
-    vi.stubEnv("GITHUB_OUTPUT", out);
-    await run([...base(), "--spec-file", specFile()]);
-    expect(readFileSync(out, "utf8")).toBe("project_id=new1\nspec_id=spec9\n");
-  });
-});
-
-import { createHash } from "node:crypto";
-const hashOf = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
-
-describe("the project's repository follows the CI (the latest sender wins)", () => {
-  const base = () => ["--file", junitFile(), "--kind", "unit", "--tool", "vitest", "--project", "demo", "--run-key", "k", "--repo", "acme/app"];
-  const patches = () => calls.filter((c) => c.method === "PATCH");
-
-  it("overwrites a repository that differs, and says what it was", async () => {
-    stubApi({ id: "p9", repo: "acme/old" });
-    await run(base());
-    expect(patches().map((c) => c.body)).toEqual([{ repo: "acme/app" }]);
-    expect(stderr.join("")).toContain("Repository of the project set to acme/app (was acme/old)");
-  });
-
-  it("fills in a repository that was never set", async () => {
-    stubApi({ id: "p9", repo: null });
-    await run(base());
-    expect(patches().map((c) => c.body)).toEqual([{ repo: "acme/app" }]);
-    expect(stderr.join("")).toContain("(was not set)");
-  });
-
-  it("writes nothing when it is the same: a pipeline on every commit leaves the project alone", async () => {
-    stubApi({ id: "p9", repo: "acme/app" });
-    await run(base());
-    expect(patches()).toEqual([]);
-  });
-
-  it("writes nothing for a project it just created, and nothing without a repository", async () => {
-    stubApi(null);
-    await run(base());
-    expect(patches()).toEqual([]);
-    calls = [];
-    stubApi({ id: "p9", repo: "acme/old" });
-    await run(base().slice(0, -2));
-    expect(patches()).toEqual([]);
-  });
-
-  it("reads the project first when sending by id", async () => {
-    stubApi({ id: "p9", repo: "acme/old" });
-    await run([...base(), "--project-id", "p9"]);
-    expect(calls.map((c) => c.method + " " + c.url.pathname)).toEqual(["POST /api/v1/projects/p9/results", "GET /api/v1/projects/p9", "PATCH /api/v1/projects/p9"]);
   });
 });
