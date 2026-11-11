@@ -29,6 +29,7 @@ interface PushOptions {
   org?: string;
   dryRun?: boolean;
   rename?: boolean;
+  followVersion?: boolean;
   repository?: string;
   provider?: string;
   component?: string;
@@ -43,6 +44,7 @@ export function buildPushCommand(): Command {
     .requiredOption("--file <path>", "the OpenAPI document (YAML or JSON, up to 2 MiB)")
     .option("--name <name>", "the spec's name in the catalog (default: the document's info.title, then the file's name)")
     .option("--id <id>", "push to this spec by id: a rename cannot make a second one")
+    .option("--follow-version", "with --id: the id names the FIRST spec of an API (its initial version); the document goes to the spec of ITS API version of that API, found by the API version, and that spec is made when the API does not have it yet (a new major needs no change of the id). API versions are registered in order: the next one after the highest the API has, otherwise nothing is registered and the push fails")
     .option("--rename", "with --id: also rename the spec to --name (default: the document's info.title) when it is called something else")
     .option("--group <name>", "the spec's group, part of its key (the same name may exist in other groups: an environment each): the spec is looked up in this group, and a NEW one is filed there (the group is made when missing). Default: no group, which does not mean any group: a name that exists only in groups is an error that lists them. An existing spec is never moved by a push")
     .option("--api-version <v>", "the spec's API version (v1, v2), part of its key: a new major API version is a new spec. Default: what the document's info.version gives (1.8.0 -> v1, v2.0 -> v2); needed when it gives none (2023-01, latest). A document of another major than an existing spec of that name makes the NEW spec for its API version and leaves the other alone"
@@ -72,6 +74,7 @@ export function buildPushCommand(): Command {
         note: opts.note ?? ciNote(ci, undefined),
         id: opts.id,
         rename: opts.rename,
+        followVersion: opts.followVersion,
         // A name asked for wins over the id the pipeline's variable carries.
         repositoryId: opts.repository ? undefined : (opts.repositoryId ?? (process.env.NB_REPOSITORY_ID?.trim() || undefined)),
         repository: opts.repository,

@@ -43,7 +43,7 @@ const file = (text = DOC, name = "openapi.yaml") => {
 };
 
 interface World {
-  specs?: { id: string; name: string; group_id: string | null; repository_id?: string | null; latest_version: number; hash?: string; api_version?: string }[];
+  specs?: { id: string; name: string; group_id: string | null; repository_id?: string | null; latest_version: number; hash?: string; api_version?: string; initial_spec_id?: string | null }[];
   groups?: { id: string; name: string }[];
   repositories?: { id: string; provider: string; name: string; component?: string }[];
   /** Responses that replace the default for a request, by `METHOD path`. */
@@ -696,5 +696,55 @@ describe("pushSpec: the API version is part of the spec's key", () => {
   it("the catalog's API_VERSION_REQUIRED is turned into the way out", async () => {
     catalog({ fail: { "POST /api/v1/specs": { status: 400, code: "API_VERSION_REQUIRED", message: "no major" } } });
     await expect(pushSpec({ conn, file: file() })).rejects.toThrow(/could not tell this document's API version.*--api-version/s);
+  });
+});
+
+const DOC_V = (version: string) => `openapi: 3.0.3\ninfo:\n  title: Billing API\n  version: ${version}\npaths: {}\n`;
+const FAMILY = [
+  { id: "first", name: "Billing API", group_id: "g1", repository_id: "rp1", latest_version: 3, hash: "h", api_version: "v1", initial_spec_id: null },
+  { id: "second", name: "Billing API", group_id: "g1", repository_id: "rp1", latest_version: 1, hash: "h", api_version: "v2", initial_spec_id: "first" },
+];
+
+describe("pushSpec --follow-version: the id names the first spec of an API", () => {
+  it("pushes a document of an API version the API has to THAT spec, whatever the id names", async () => {
+    catalog({ specs: FAMILY });
+    const res = await pushSpec({ conn, file: file(DOC_V("2.1.0")), id: "first", followVersion: true });
+    expect(res).toMatchObject({ id: "second", action: "new_version", api_version: "v2" });
+    expect(calls.some((c) => c.method === "POST" && c.path === "/api/v1/specs/second/versions")).toBe(true);
+    // from any member of the family: the family is found from it
+    calls = [];
+    const again = await pushSpec({ conn, file: file(DOC_V("1.9.0")), id: "second", followVersion: true });
+    expect(again).toMatchObject({ id: "first", action: "new_version" });
+  });
+
+  it("makes the spec of the next API version, named as the initial spec is, naming it as its initial version", async () => {
+    catalog({ specs: FAMILY });
+    const res = await pushSpec({ conn, file: file(DOC_V("3.0.0")), id: "first", followVersion: true, serverUrl: "https://api.example.com" });
+    expect(res).toMatchObject({ id: "newspec", name: "Billing API", action: "created", api_version: "v3" });
+    const post = calls.find((c) => c.method === "POST" && c.path === "/api/v1/specs")!;
+    expect(post.body.initial_spec_id).toBe("first");
+    expect(post.body.name).toBe("Billing API");
+    expect(post.body.group_id).toBeUndefined(); // the catalog keeps the family's group and repository
+    expect(String(post.body.content)).toContain("https://api.example.com");
+  });
+
+  it("refuses an API version that is not the next one, before anything is sent (the catalog would refuse it too)", async () => {
+    catalog({ specs: FAMILY });
+    await expect(pushSpec({ conn, file: file(DOC_V("4.0.0")), id: "first", followVersion: true })).rejects.toThrow(/next API version of 'Billing API' is v3, not v4/);
+    expect(calls.filter((c) => c.method === "POST")).toEqual([]);
+  });
+
+  it("says in a dry run what a real push would do, writing nothing", async () => {
+    catalog({ specs: FAMILY });
+    const next = await pushSpec({ conn, file: file(DOC_V("3.0.0")), id: "first", followVersion: true, dryRun: true });
+    expect(next).toMatchObject({ id: "(new)", action: "created", api_version: "v3", name: "Billing API" });
+    await expect(pushSpec({ conn, file: file(DOC_V("5.0.0")), id: "first", followVersion: true, dryRun: true })).rejects.toThrow(/v3/);
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+
+  it("needs an id and a document with an API version", async () => {
+    catalog({ specs: FAMILY });
+    await expect(pushSpec({ conn, file: file(DOC_V("3.0.0")), followVersion: true })).rejects.toThrow(/needs --id/);
+    await expect(pushSpec({ conn, file: file(DOC_V("2023-01")), id: "first", followVersion: true })).rejects.toThrow(/API version/);
   });
 });

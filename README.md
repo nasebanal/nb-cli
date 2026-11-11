@@ -211,6 +211,20 @@ field). `nb specs specs push` takes the API version from the document: the major
 - a breaking change is a new major (`2.0.0`): the same push makes the **v2 spec** and leaves v1 untouched; pushing a document of
   another major to a spec by `--id` is refused (`API_VERSION_MISMATCH`: register it as its own spec).
 
+**A CI that names the API once: `--follow-version`.** The versions of one API are a family: each later version names the API's first
+spec (its initial version) as `initial_spec_id`. Give the id of that FIRST spec and never change it:
+
+```bash
+nb specs specs push --file openapi.yaml --id <the API's first spec> --follow-version --server-url "$API_URL"
+```
+
+The document goes to the spec of ITS API version of that API (found by the API version, whichever spec of the family the id names).
+When the API does not have that version yet the spec is made (named as the first spec is; the catalog keeps the family's group and
+repository), so a new major (`2.0.0`) needs no change of the id. API versions are registered **in order**: the next one after the
+highest the API has (v1, v2, then v3). A version that skips (v1, then v3) fails with the version that is next, and nothing is
+registered (`--dry-run` says the same without writing): register a placeholder of the missing version first, then the real document
+is a new revision of that spec afterwards. Needs `@nasebanal/api-specs-specs` 1.5.0 (`initial_spec_id`) on the catalog side.
+
 To maintain several API versions, keep each one on a **branch** of the repository with its own OpenAPI file, and let the same CI
 job push and report from whichever branch it runs on:
 

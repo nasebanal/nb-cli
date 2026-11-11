@@ -109,6 +109,12 @@ export interface PushParams {
   component?: string;
   /** Replace the document's top-level `servers` with this one URL before sending (the environment's URL). */
   serverUrl?: string;
+  /**
+   * With `id`: the id names the FIRST spec of an API (its initial version). The document goes to the spec of ITS API version of that API (found
+   * by the API version), and that spec is made when the API does not have it yet (the API versions are registered in order: the next one after
+   * the highest). A new major version then needs no change of the id.
+   */
+  followVersion?: boolean;
   /** Read what is there, write nothing, say what would happen. */
   dryRun?: boolean;
 }
@@ -189,6 +195,8 @@ export interface SpecRow {
   latest_version: number;
   /** The API version (v1, v2): part of the spec's key. */
   api_version?: string;
+  /** The first spec registered for the API this spec is a later version of (its initial version); null = an API of its own, or the initial version itself. */
+  initial_spec_id?: string | null;
 }
 
 /** `--provider`: one of the four the catalog knows. */
@@ -322,7 +330,64 @@ export async function pushSpec(p: PushParams): Promise<PushResult> {
   }
 }
 
+/** The number in an API version ("v2" -> 2), or null when it is not of that form (a calendar version). */
+function versionNumber(v: string): number | null {
+  const m = /^[vV](\d{1,3})$/.exec(v.trim());
+  return m ? Number.parseInt(m[1], 10) : null;
+}
+
+/**
+ * `--follow-version`: the spec of the document's API version in the family of the spec `p.id` names (its initial version, or any spec of the
+ * API: the family is found from it). Found: the push goes to that spec. Not there: it is made after the highest version the API has, with
+ * `initial_spec_id`, named as the initial spec is (the catalog keeps the group and the repository of the family); a version that is not the
+ * next one is refused here as the catalog refuses it (INITIAL_VERSION_NOT_NEXT), which is also what a dry run says.
+ */
+async function pushFollowingVersion(p: PushParams): Promise<PushResult> {
+  if (!p.id) throw new Error("--follow-version needs --id: the id of the API's first spec");
+  let text = readSpecFile(p.file);
+  const explicitVersion = p.apiVersion !== undefined ? checkApiVersion(p.apiVersion) : undefined;
+  const apiVersion = explicitVersion ?? apiVersionOf(text) ?? undefined;
+  if (apiVersion === undefined) {
+    throw new Error("--follow-version needs the document's API version (a major such as 2.0.0 -> v2): say which with --api-version <v1|v2|...>");
+  }
+  const given = (await findSpec(p.conn, "", p.id)) as SpecRow;
+  const initialId = given.initial_spec_id ?? given.id;
+  const res = await request({ ...headersOf(p.conn), method: "GET", path: "/api/v1/specs" });
+  const family = (res.data as Envelope<{ data: SpecRow[] }>).data.data.filter((s) => s.id === initialId || s.initial_spec_id === initialId);
+  const initial = family.find((s) => s.id === initialId) ?? given;
+  const found = family.find((s) => sameApiVersion(s.api_version ?? "v1", apiVersion));
+  if (found) return pushSpecInner({ ...p, followVersion: false, id: found.id });
+
+  // Not there yet: it must be the next one after the highest the API has.
+  const numbers = family.map((s) => versionNumber(s.api_version ?? "v1")).filter((n): n is number => n !== null);
+  const wanted = versionNumber(apiVersion);
+  if (wanted !== null && numbers.length > 0 && wanted !== Math.max(...numbers) + 1) {
+    throw new Error(
+      `The next API version of '${initial.name}' is v${Math.max(...numbers) + 1}, not ${apiVersion}: register the versions in order (a placeholder document will do for one that is not ready). Nothing was registered.`,
+    );
+  }
+  if (p.serverUrl !== undefined) text = setServers(text, checkServerUrl(p.serverUrl)).text;
+  const hash = hashText(text);
+  const served = p.serverUrl ? { server_url: checkServerUrl(p.serverUrl) } : {};
+  if (p.dryRun) {
+    return { id: "(new)", name: initial.name, version: 1, api_version: apiVersion, group_id: initial.group_id, action: "created", content_hash: hash, repository_id: initial.repository_id ?? null, ...served };
+  }
+  try {
+    const created = await request({
+      ...headersOf(p.conn),
+      method: "POST",
+      path: "/api/v1/specs",
+      body: { name: initial.name, content: text, initial_spec_id: initialId, ...(explicitVersion ? { api_version: explicitVersion } : {}), ...(p.description ? { description: p.description } : {}) },
+    });
+    const row = (created.data as Envelope<SpecRow>).data;
+    return { id: row.id, name: row.name, version: 1, api_version: row.api_version ?? apiVersion, group_id: row.group_id ?? null, action: "created", content_hash: hash, repository_id: row.repository_id ?? null, ...served };
+  } catch (err) {
+    throw new Error(`The catalog refused the spec: ${reasonOf(err)}`);
+  }
+}
+
 async function pushSpecInner(p: PushParams): Promise<PushResult> {
+  if (p.followVersion) return pushFollowingVersion(p);
   let text = readSpecFile(p.file);
   let serverUrl: string | undefined;
   let serversEdit: ServersEdit["method"] | undefined;
