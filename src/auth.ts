@@ -9,7 +9,11 @@
  */
 import { Command } from "commander";
 import { createInterface } from "node:readline";
-import { loadConfig, saveConfig, resolveToken, resolveEnv, configFilePath, type Config } from "./config.js";
+import { loadConfig, saveConfig, resolveToken, resolveEnv, configFilePath, peekBaseUrlOverride, type Config, type Environment } from "./config.js";
+import { API_CATALOG } from "./apis.js";
+import { resolveBaseUrl } from "./http.js";
+import { loadSpec } from "./spec/loader.js";
+import { specsBaseUrl } from "./specs/push.js";
 import { login } from "./oauth.js";
 import { envTokenHint } from "./output.js";
 
@@ -97,8 +101,18 @@ export function buildAuthCommand(): Command {
             ? "stored PAT"
             : "none";
       const masked = token ? `${token.slice(0, 10)}…${token.slice(-4)}` : "(not set)";
-      process.stdout.write(`Environment: ${resolveEnv(config)}\n`);
+      const env = resolveEnv(config);
+      process.stdout.write(`Environment: ${env}\n`);
+      process.stdout.write(`Targets (the host each command calls; a NB_<API>_BASE_URL wins over the environment):\n`);
+      for (const line of targetLines(env)) process.stdout.write(`  ${line}\n`);
       process.stdout.write(`Token:       ${masked}  [source: ${source}]\n`);
+      // The stored `nb auth login` session is shown whether or not it is the credential in use: NB_TOKEN beats it, and a
+      // status that hid it would make "am I logged in, and as whom" unanswerable exactly when the two disagree.
+      if (config.auth) {
+        const who = loginIdentity(config.auth.id_token) ?? "(not readable)";
+        const note = source === "OAuth login" ? "in use; from the login, not checked with the server" : "stored, NOT in use: another credential wins";
+        process.stdout.write(`Login:       ${who}  [${note}]\n`);
+      }
       if (config.auth?.expires_at) {
         const expired = config.auth.expires_at <= Date.now();
         process.stdout.write(
@@ -110,4 +124,60 @@ export function buildAuthCommand(): Command {
     });
 
   return auth;
+}
+
+/**
+ * The word the reader is looking for, next to the URL, decided by the host itself: `*.nasebanal.com` is production, `localhost` /
+ * `127.0.0.1` is local, anything else (a stub, a self-hosted copy) is `other`, never claimed to be production.
+ */
+export function hostKind(url: string): "production" | "local" | "other" {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return "other";
+  }
+  if (host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1") return "local";
+  if (host === "nasebanal.com" || host.endsWith(".nasebanal.com")) return "production";
+  return "other";
+}
+
+/**
+ * What `nb auth status` says about where the commands go: per API, the host the next command would call and whether that is
+ * local or production, plus which variable put it there when one did (the environment alone does not tell, because a
+ * NB_<API>_BASE_URL beats it).
+ */
+export function targetLines(env: Environment): string[] {
+  const width = Math.max(...API_CATALOG.map((a) => a.name.length));
+  return API_CATALOG.map((api) => {
+    // `nb specs` verbs read the catalog's host (NB_SPECS_BASE_URL only); every other group resolves from its spec's `servers`.
+    const peek = peekBaseUrlOverride(api.name);
+    const via =
+      api.name === "specs"
+        ? process.env.NB_SPECS_BASE_URL?.trim()
+          ? { url: specsBaseUrl(env), variable: "NB_SPECS_BASE_URL" }
+          : undefined
+        : peek;
+    const url = api.name === "specs" ? specsBaseUrl(env) : (peek?.url ?? resolveBaseUrl(loadSpec(api.spec).servers, env));
+    return `${api.name.padEnd(width)}  ${url}  [${hostKind(url)}${via ? `, from ${via.variable}` : ""}]`;
+  });
+}
+
+/**
+ * Who a `nb auth login` was done as, `Name <email>`, read from the ID token that login stored (the payload is plain base64url JSON).
+ * For display only: nothing is authorized on it (the servers verify the access token's signature). null when there is no ID token
+ * or it cannot be read.
+ */
+export function loginIdentity(idToken: string | undefined): string | null {
+  const payload = idToken?.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { name?: unknown; email?: unknown; nickname?: unknown };
+    const email = typeof claims.email === "string" ? claims.email : "";
+    const name = typeof claims.name === "string" ? claims.name : typeof claims.nickname === "string" ? claims.nickname : "";
+    if (name && email) return `${name} <${email}>`;
+    return email || name || null;
+  } catch {
+    return null;
+  }
 }
