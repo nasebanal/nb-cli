@@ -24,7 +24,8 @@ beforeEach(() => {
   stderr = [];
   vi.spyOn(process.stdout, "write").mockImplementation((s) => (stdout.push(String(s)), true));
   vi.spyOn(process.stderr, "write").mockImplementation((s) => (stderr.push(String(s)), true));
-  vi.stubEnv("NB_BASE_URL", "http://api.test");
+  vi.stubEnv("NB_BASE_URL", "");
+  vi.stubEnv("NB_ASSURANCE_BASE_URL", "http://api.test");
   vi.stubEnv("GITHUB_ACTIONS", "");
   vi.stubEnv("GITLAB_CI", "");
   vi.stubEnv("NB_API_VERSION", "");

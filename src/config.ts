@@ -106,3 +106,38 @@ export function resolveEnv(config: Config = loadConfig()): Environment {
 export function configFilePath(): string {
   return configPath();
 }
+
+let warnedSharedBaseUrl = false;
+
+/**
+ * The host a command group talks to when the environment names one, or undefined (then the spec's own `servers` entry for the
+ * active environment is used). `NB_<API>_BASE_URL` is that API's alone (`NB_ASSURANCE_BASE_URL`, `NB_RECORD_BASE_URL`, ...: the
+ * API is the command group's name, as in `NB_<API>_ORG`). The older `NB_BASE_URL` is still read as a fallback, but it applies
+ * to EVERY API at once (pointing it at one local Worker sends `nb record` there too), so it is deprecated and says so, once, on stderr.
+ * Origin only: the spec's path is appended. A trailing slash is dropped; an empty value counts as unset.
+ */
+export function baseUrlOverride(apiName: string): string | undefined {
+  const found = peekBaseUrlOverride(apiName);
+  if (found?.variable === "NB_BASE_URL" && !warnedSharedBaseUrl) {
+    warnedSharedBaseUrl = true;
+    process.stderr.write(
+      `nb: NB_BASE_URL applies to every API and is deprecated; set NB_${apiName.toUpperCase()}_BASE_URL (the host of the ${apiName} API) instead.\n`,
+    );
+  }
+  return found?.url;
+}
+
+/** The same lookup without the deprecation notice, and with the variable that supplied the host (for `nb auth status`). */
+export function peekBaseUrlOverride(apiName: string): { url: string; variable: string } | undefined {
+  const clean = (v: string | undefined) => v?.trim().replace(/\/$/, "") || undefined;
+  const ownName = `NB_${apiName.toUpperCase()}_BASE_URL`;
+  const own = clean(process.env[ownName]);
+  if (own) return { url: own, variable: ownName };
+  const shared = clean(process.env.NB_BASE_URL);
+  return shared ? { url: shared, variable: "NB_BASE_URL" } : undefined;
+}
+
+/** Tests: forget that the deprecation was already said. */
+export function resetBaseUrlWarning(): void {
+  warnedSharedBaseUrl = false;
+}
