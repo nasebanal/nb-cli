@@ -632,6 +632,7 @@ Overridable env vars: `NB_AUTH0_DOMAIN`, `NB_AUTH0_AUDIENCE`,
 | Option | Description |
 |--------|-------------|
 | `--env <production\|local>` | Target environment; picks the matching `servers` entry from the spec. Also `NB_ENV`. |
+| `NB_<API>_BASE_URL` | The host of ONE API instead of its spec's `servers` entry (origin only; the spec's path is appended): `NB_ASSURANCE_BASE_URL=http://localhost:8791`, `NB_SPECS_BASE_URL=http://localhost:8792`, and `NB_ACCOUNT_BASE_URL` / `NB_RECORD_BASE_URL` / `NB_TARGET_BASE_URL`. `<API>` is the command group, as in `NB_<API>_ORG`. The shared `NB_BASE_URL` (one host for every API) still works but is **deprecated** and says so on stderr: pointing it at one local Worker sent every other command there too. |
 | `--token <token>` | Override stored credentials with a PAT for one invocation. |
 | `-V, --version` | Print the CLI version. |
 

@@ -128,9 +128,11 @@ describe("a header parameter (the catalog's active organization) on a generated 
     vi.restoreAllMocks();
   });
 
-  const run = async (args: string[]) => {
+  const run = async (args: string[], hostVar = "NB_SPECS_BASE_URL") => {
     headers = [];
-    vi.stubEnv("NB_BASE_URL", "http://specs.test");
+    vi.stubEnv("NB_BASE_URL", "");
+    vi.stubEnv("NB_SPECS_BASE_URL", "");
+    vi.stubEnv(hostVar, "http://specs.test");
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_input: URL, init: RequestInit) => {
@@ -155,6 +157,17 @@ describe("a header parameter (the catalog's active organization) on a generated 
     expect(headers[0]["X-Active-Organization-Id"]).toBe("7");
     await run(["repositories", "list"]);
     expect(headers[0]["X-Active-Organization-Id"]).toBe("personal");
+  });
+
+  it("goes to the host of NB_<API>_BASE_URL, and the deprecated shared NB_BASE_URL still does too", async () => {
+    const urls: string[] = [];
+    const wrapped = async (hostVar: string) => {
+      await run(["repositories", "list"], hostVar);
+      urls.push(String((vi.mocked(fetch).mock.calls[0] as unknown[])[0]));
+    };
+    await wrapped("NB_SPECS_BASE_URL");
+    await wrapped("NB_BASE_URL");
+    expect(urls.every((u) => u.startsWith("http://specs.test/"))).toBe(true);
   });
 
   it("reads $NB_SPECS_ORG, which the flag beats", async () => {

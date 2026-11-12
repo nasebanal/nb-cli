@@ -17,7 +17,7 @@
 import { Command, Option } from "commander";
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { resolveAccessToken, resolveEnv, type Environment } from "../config.js";
+import { baseUrlOverride, resolveAccessToken, resolveEnv, type Environment } from "../config.js";
 import { request, resolveBaseUrl, ApiError } from "../http.js";
 import { loadSpec } from "../spec/loader.js";
 import { exportGithubOutput, printJson } from "../output.js";
@@ -609,8 +609,7 @@ export function buildReportUploadCommand(): Command {
         return;
       }
 
-      const override = process.env.NB_BASE_URL?.replace(/\/$/, "");
-      const baseUrl = override ?? resolveBaseUrl(loadSpec("assurance.yaml").servers, env);
+      const baseUrl = baseUrlOverride("assurance") ?? resolveBaseUrl(loadSpec("assurance.yaml").servers, env);
 
       // Assurance and the catalog act for the same owner: the organization goes to both (personal is the default and sent as is).
       const orgHeaders = org === "personal" ? undefined : { "X-Active-Organization-Id": org };
