@@ -125,15 +125,15 @@ export function pluginCall(
 export function pluginHelp(plugins: readonly Plugin[]): string {
   const lines: string[] = [""];
   if (plugins.length > 0) {
-    lines.push("Tools (programs named nb-<name> on your PATH):");
+    lines.push("Tools:");
     const width = Math.max(...plugins.map((p) => p.name.length)) + 2;
     for (const p of plugins) lines.push(`  ${p.name.padEnd(width)}${p.description}`.trimEnd());
-    lines.push("Run `nb <tool> -h` for a tool's own usage.");
+    lines.push("", "A tool is a program named nb-<name> on your PATH; `nb <tool> -h` shows its own usage.");
   }
   const absent = Object.entries(KNOWN_TOOLS).filter(([name]) => !plugins.some((p) => p.name === name));
   if (absent.length > 0) {
     if (plugins.length > 0) lines.push("");
-    lines.push("Other NASEBANAL tools (not installed; `nb <tool>` runs them once they are on your PATH):");
+    lines.push("Other tools (not installed; `nb <tool>` runs them once `nb-<tool>` is on your PATH):");
     const width = Math.max(...absent.map(([name]) => name.length)) + 2;
     for (const [name, t] of absent) lines.push(`  ${name.padEnd(width)}${t.repo}`);
   }

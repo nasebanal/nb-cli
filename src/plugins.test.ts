@@ -114,22 +114,22 @@ describe("pluginCall", () => {
 describe("pluginHelp", () => {
   it("lists the installed tools with their descriptions and, apart, where to get the published ones that are missing", () => {
     const text = pluginHelp([{ name: "secrets", file: "/x/nb-secrets", description: "keeps secrets" }]);
-    expect(text).toContain("Tools (programs named nb-<name> on your PATH):");
+    expect(text).toContain("\nTools:\n");
     expect(text).toMatch(/\n {2}secrets {2}keeps secrets\n/);
-    expect(text).toContain("Run `nb <tool> -h` for a tool's own usage.");
-    expect(text).toContain("Other NASEBANAL tools (not installed");
+    expect(text).toContain("`nb <tool> -h` shows its own usage.");
+    expect(text).toContain("Other tools (not installed");
     expect(text).toMatch(/\n {2}quickstarts {2}https:\/\/github\.com\/nasebanal\/nb-quickstarts\n/);
     expect(text).not.toMatch(/\n {2}secrets .*github/);
   });
 
   it("only points to the published tools when none is installed, and to nothing when all are", () => {
-    expect(pluginHelp([])).not.toContain("Tools (programs named");
+    expect(pluginHelp([])).not.toContain("\nTools:\n");
     expect(pluginHelp([])).toContain("nb-secrets");
     const all = pluginHelp([
       { name: "secrets", file: "/x", description: "" },
       { name: "quickstarts", file: "/y", description: "" },
     ]);
-    expect(all).not.toContain("Other NASEBANAL tools");
+    expect(all).not.toContain("Other tools");
   });
 });
 
