@@ -17,6 +17,7 @@ import { buildReportUploadCommand } from "./reports/upload.js";
 import { attachMonitorSpecOptions } from "./reports/monitors.js";
 import { attachSpecsCommands, buildSpecsCommand } from "./specs/command.js";
 import { buildUpgradeCommand, startUpdateNotifier } from "./update.js";
+import { findPlugins, missingMessage, pluginCall, pluginHelp, runPlugin } from "./plugins.js";
 
 // Single source of truth for the version: package.json (dist/ and src/ both sit
 // next to it). A hard-coded string here drifts from the release tag.
@@ -71,7 +72,22 @@ for (const api of API_CATALOG) {
   program.addCommand(group);
 }
 
+// External tools (`nb secrets` runs `nb-secrets` from PATH). A built-in command, a generated API group included, always
+// wins over a tool of the same name; `nb -h` lists what is installed (read from the scripts, nothing is run).
+const reserved = new Set(["help", ...program.commands.flatMap((c) => [c.name(), ...c.aliases()])]);
+program.addHelpText("after", () => pluginHelp(findPlugins(process.env.PATH, reserved)));
+
 async function main(): Promise<void> {
+  const call = pluginCall(process.argv, process.env.PATH, reserved);
+  if (call) {
+    if ("missing" in call) {
+      process.stderr.write(`${missingMessage(call.missing)}\n`);
+      process.exitCode = 1;
+    } else {
+      process.exitCode = await runPlugin(call.plugin, call.args);
+    }
+    return;
+  }
   const notifier = startUpdateNotifier(version, process.argv);
   try {
     await program.parseAsync(process.argv);
