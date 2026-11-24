@@ -639,6 +639,34 @@ Overridable env vars: `NB_AUTH0_DOMAIN`, `NB_AUTH0_AUDIENCE`,
 The active environment defaults to `production`; `--env local` targets the
 `wrangler dev` servers declared in each spec.
 
+## Other NASEBANAL tools (`nb secrets`, `nb quickstarts`)
+
+`nb <name> ...` runs the program `nb-<name>` found on your `PATH`, the way `git` and `kubectl` run their extensions. NASEBANAL's other tools keep their own repositories, install and releases, and do not need Node or this package; `nb` only finds them and hands over.
+
+```bash
+# install a tool once, from its own repository (each has a `--install` that links it into ~/.local/bin)
+git clone https://github.com/nasebanal/nb-secrets.git && nb-secrets/bin/nb-secrets --install
+
+nb secrets list ~/.secrets/deploy.env.age     # = nb-secrets list ...
+nb secrets -h                                 # the tool's own usage
+nb -h                                         # lists the installed tools, and where to get the ones that are not
+```
+
+| Tool | What it is |
+|---|---|
+| [`nb-secrets`](https://github.com/nasebanal/nb-secrets) | Secrets in passphrase-encrypted files, handed to a command only when you type the passphrase |
+| [`nb-quickstarts`](https://github.com/nasebanal/nb-quickstarts) | Docker and Makefile quickstarts for infrastructure and testing tools |
+
+How it behaves:
+
+- **A built-in command always wins.** A program called `nb-auth` on `PATH` cannot take over `nb auth`; the generated API groups are protected the same way. Only the first word after `nb` is looked at (`nb secrets ...`, not `nb --env local secrets ...`).
+- **Nothing is run to build the list.** `nb -h` must stay fast and must not execute whatever is called `nb-*` on your `PATH`, so a tool's one-line description is **read** from the first comment line after its shebang: `# nb-<name> - <what it does>`. A program that is not a script is listed by name only.
+- **A tool is started only when you type its name**, directly (never through a shell), with your terminal, environment and exit status passed through, and `NB_PLUGIN_NAME="nb <name>"` set so it can print its usage the way it was called. Ctrl-C is left to the tool (a passphrase prompt, for example).
+- **A published tool that is not installed** gets a message with its repository instead of "unknown command".
+- Names are plain lowercase (`[a-z][a-z0-9-]*`); the first match on `PATH` wins; macOS and Linux only. Anything named `nb-<name>` and executable on your `PATH` runs with your rights, as with any command, so keep `PATH` to directories you trust.
+
+To make your own: an executable `nb-<name>` on `PATH` whose second line is `# nb-<name> - <one line>`.
+
 ## Adding a New API
 
 1. Publish/own its spec in `nb-api-specs` (it ships as `@nasebanal/api-specs-<api>`).
