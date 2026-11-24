@@ -652,6 +652,8 @@ nb secrets -h                                 # the tool's own usage
 nb -h                                         # lists the installed tools, and where to get the ones that are not
 ```
 
+Every tool's usage follows the same layout, `nb -h` included: `Usage:` first (as GNU tools and commander do), then one description line (`<emoji> NASEBANAL <Name> - <what it does>`), then `Commands:` and `Options:`. A tool's usage also says `Also runs as: nb <tool> ...` (nb 0.15.0 or later), and shows the name you typed: `nb secrets -h` prints `Usage: nb secrets <command>`, `nb-secrets -h` prints `Usage: nb-secrets <command>`.
+
 | Tool | What it is |
 |---|---|
 | [`nb-secrets`](https://github.com/nasebanal/nb-secrets) | Secrets in passphrase-encrypted files, handed to a command only when you type the passphrase |
@@ -661,7 +663,7 @@ How it behaves:
 
 - **A built-in command always wins.** A program called `nb-auth` on `PATH` cannot take over `nb auth`; the generated API groups are protected the same way. Only the first word after `nb` is looked at (`nb secrets ...`, not `nb --env local secrets ...`).
 - **Nothing is run to build the list.** `nb -h` must stay fast and must not execute whatever is called `nb-*` on your `PATH`, so a tool's one-line description is **read** from the first comment line after its shebang: `# nb-<name> - <what it does>`. A program that is not a script is listed by name only.
-- **A tool is started only when you type its name**, directly (never through a shell), with your terminal, environment and exit status passed through, and `NB_PLUGIN_NAME="nb <name>"` set so it can print its usage the way it was called. Ctrl-C is left to the tool (a passphrase prompt, for example).
+- **A tool is started only when you type its name**, directly (never through a shell), with your terminal, environment and exit status passed through, and `NB_PLUGIN_NAME="nb <name>"` set so it can print its usage the way it was called (`nb-secrets` and `nb-quickstarts` do). Ctrl-C is left to the tool (a passphrase prompt, for example).
 - **A published tool that is not installed** gets a message with its repository instead of "unknown command".
 - Names are plain lowercase (`[a-z][a-z0-9-]*`); the first match on `PATH` wins; macOS and Linux only. Anything named `nb-<name>` and executable on your `PATH` runs with your rights, as with any command, so keep `PATH` to directories you trust.
 

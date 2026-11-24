@@ -27,7 +27,8 @@ const program = new Command();
 
 program
   .name("nb")
-  .description("Command-line interface for NASEBANAL APIs (generated from OpenAPI contracts).")
+  // Usage first, then this one line, "<emoji> NASEBANAL <Name> - <what it does>": the layout nb-secrets and nb-quickstarts use.
+  .description("💻 NASEBANAL CLI - command-line interface for NASEBANAL APIs")
   .version(version)
   .option("--env <env>", "target environment: production | local")
   .option("--token <token>", "override the stored PAT for this invocation")
