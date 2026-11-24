@@ -415,6 +415,27 @@ nb specs specs pull --name "Billing API" > spec.yaml        # latest; the docume
   only advance once the provider has deployed, a pull of `latest` can return a version that
   nothing implements. Pinning a revision (and its hash) is the safe way to use it today.
 
+## Stability and compatibility
+
+From **1.0.0**, `nb` follows [SemVer](https://semver.org/): 1.0.0 is the first stable release (the CLI is out of beta), and what is listed below changes in a *major* release only.
+
+**What the promise covers** (the stable command groups):
+
+- the names of commands, subcommands and flags, and what they mean;
+- the exit status (`0` on success, non-zero on failure);
+- the shape of the JSON a command prints on standard output (a field is not removed or renamed, and its type does not change);
+- the environment variables and the config file the README documents (`NB_ENV`, `NB_<API>_BASE_URL`, ...).
+
+**What a release may do without a major version:** add a command, a flag or a JSON field (minor); fix a bug (patch); change the wording of help, messages and errors written for people (standard error).
+
+**Generated from the API contracts.** The command tree under each API group comes from the OpenAPI contracts a release bundles (`spec-versions.json`). A breaking change in a bundled contract that changes the commands, flags or output of a stable group is released as a *major* version of `nb`.
+
+**Deprecation.** A command, flag or environment variable that is going away is first deprecated for at least one minor release, with a warning on standard error that names what to use instead.
+
+**Beta.** The groups marked **[beta]** in `nb -h` (`assurance` and `specs`, which are NASEBANAL Evolution's beta) are **not** covered: they may change in any release, a minor one included. When Evolution leaves beta, the marker goes and the groups join the promise (a minor release, announced in the release notes).
+
+**Before 1.0.0** (0.x), a breaking change bumps the minor version.
+
 ## Installation
 
 The CLI installs the `nb` command. Node ≥ 20 is required.
@@ -457,7 +478,8 @@ turns the notice off. A dev link to a source checkout is never overwritten:
 
 ### Versioning and releases
 
-Versions follow SemVer (0.x until 1.0: breaking changes bump the minor). Each
+Versions follow SemVer; see [Stability and compatibility](#stability-and-compatibility)
+for what 1.0.0 and later promise (0.x: breaking changes bump the minor). Each
 release bundles a fixed set of API contract versions, recorded in
 [`spec-versions.json`](spec-versions.json).
 

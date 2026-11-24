@@ -76,6 +76,10 @@ for (const api of API_CATALOG) {
 // External tools (`nb secrets` runs `nb-secrets` from PATH). A built-in command, a generated API group included, always
 // wins over a tool of the same name; `nb -h` lists what is installed (read from the scripts, nothing is run).
 const reserved = new Set(["help", ...program.commands.flatMap((c) => [c.name(), ...c.aliases()])]);
+program.addHelpText(
+  "after",
+  '\n[beta] marks the groups of NASEBANAL Evolution\'s beta: they may change in any release.\nSee README, "Stability and compatibility".',
+);
 program.addHelpText("after", () => pluginHelp(findPlugins(process.env.PATH, reserved)));
 
 async function main(): Promise<void> {
