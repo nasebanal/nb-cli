@@ -18,6 +18,7 @@ import { attachMonitorSpecOptions } from "./reports/monitors.js";
 import { attachSpecsCommands, buildSpecsCommand } from "./specs/command.js";
 import { buildUpgradeCommand, startUpdateNotifier } from "./update.js";
 import { findPlugins, missingMessage, pluginCall, pluginHelp, runPlugin } from "./plugins.js";
+import { SHELLS, complete, completionScript, type Shell } from "./completion.js";
 
 // Single source of truth for the version: package.json (dist/ and src/ both sit
 // next to it). A hard-coded string here drifts from the release tag.
@@ -36,6 +37,18 @@ program
 
 program.addCommand(buildAuthCommand());
 program.addCommand(buildUpgradeCommand(version));
+program
+  .command("completion")
+  .description("Print the tab-completion script: source <(nb completion zsh)")
+  .argument("<shell>", `shell: ${SHELLS.join(" | ")}`)
+  .action((shell: string) => {
+    if (!(SHELLS as readonly string[]).includes(shell)) {
+      printError(new Error(`Unknown shell '${shell}'. Use one of: ${SHELLS.join(", ")}.`));
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(completionScript(shell as Shell));
+  });
 
 for (const api of API_CATALOG) {
   if (!specExists(api.spec)) {
@@ -83,6 +96,12 @@ program.addHelpText(
 program.addHelpText("after", () => pluginHelp(findPlugins(process.env.PATH, reserved)));
 
 async function main(): Promise<void> {
+  // The shells' completion scripts call `nb __complete <words...>`: one candidate per line, nothing else on stdout.
+  if (process.argv[2] === "__complete") {
+    const candidates = await complete(program, findPlugins(process.env.PATH, reserved), process.argv.slice(3));
+    if (candidates.length > 0) process.stdout.write(candidates.join("\n") + "\n");
+    return;
+  }
   const call = pluginCall(process.argv, process.env.PATH, reserved);
   if (call) {
     if ("missing" in call) {
