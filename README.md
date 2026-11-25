@@ -689,7 +689,18 @@ How it behaves:
 - **A published tool that is not installed** gets a message with its repository instead of "unknown command".
 - Names are plain lowercase (`[a-z][a-z0-9-]*`); the first match on `PATH` wins; macOS and Linux only. Anything named `nb-<name>` and executable on your `PATH` runs with your rights, as with any command, so keep `PATH` to directories you trust.
 
-To make your own: an executable `nb-<name>` on `PATH` whose second line is `# nb-<name> - <one line>`.
+To make your own: an executable `nb-<name>` on `PATH` whose second line is `# nb-<name> - <one line>`. To complete below it, see "Tab completion".
+
+## Tab completion
+
+```bash
+# ~/.zshrc, after compinit                    # ~/.bashrc
+source <(nb completion zsh)                   source <(nb completion bash)
+```
+
+`nb quick<TAB>` completes to `nb quickstarts`, `nb assu<TAB>` to `nb assurance`, and below a command its sub-commands and (after a `-`) its options. The script only asks `nb __complete <words...>`, so it follows the command tree, the generated API groups included, with no list to keep in step.
+
+A tool answers for the words after its name: `nb quickstarts kong re<TAB>` runs `nb-quickstarts --complete kong re`, which prints one candidate per line (the last word is the one being typed). `nb` asks a tool only when its script contains the literal `--complete`, so it never runs an `nb-*` program that did not say it can answer (the same rule as `nb -h`); a tool that fails or takes more than 2 seconds just gives no candidates.
 
 ## Adding a New API
 
