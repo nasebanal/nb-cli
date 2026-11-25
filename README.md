@@ -698,6 +698,8 @@ To make your own: an executable `nb-<name>` on `PATH` whose second line is `# nb
 source <(nb completion zsh)                   source <(nb completion bash)
 ```
 
+The `source` line has to come **after** the shell's completion system is started (`compinit`). With oh-my-zsh that means below `source "$ZSH/oh-my-zsh.sh"` (oh-my-zsh runs `compinit` there), so add it at the very end of `~/.zshrc`. Then open a new terminal tab, or run `exec zsh`. `print -r -- ${_comps[nb]}` prints `_nb` once it is registered. Without the line, `nb quick<TAB>` falls back to file names (and may offer a directory such as `nb-quickstarts/`). Needs nb 1.1.0 or later.
+
 `nb quick<TAB>` completes to `nb quickstarts`, `nb assu<TAB>` to `nb assurance`, and below a command its sub-commands and (after a `-`) its options. The script only asks `nb __complete <words...>`, so it follows the command tree, the generated API groups included, with no list to keep in step.
 
 A tool answers for the words after its name: `nb quickstarts kong re<TAB>` runs `nb-quickstarts --complete kong re`, which prints one candidate per line (the last word is the one being typed). `nb` asks a tool only when its script contains the literal `--complete`, so it never runs an `nb-*` program that did not say it can answer (the same rule as `nb -h`); a tool that fails or takes more than 2 seconds just gives no candidates.
