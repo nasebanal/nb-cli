@@ -43,7 +43,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-interface CatalogRepo { id: string; provider: string; name: string; component?: string }
+interface CatalogRepo { id: string; provider: string; name: string; component?: string; attachments_enabled?: boolean }
 interface CatalogSpec { id: string; name: string; repository_id: string | null; group_id?: string | null }
 
 /**
@@ -55,7 +55,7 @@ function stubApi(
   _unused?: unknown,
   opts: { resultsStatus?: number; resultsError?: { code: string; message: string }; attachmentStatus?: number; repositories?: CatalogRepo[]; specs?: CatalogSpec[]; groups?: { id: string; name: string }[] } = {},
 ) {
-  const repositories = opts.repositories ?? [{ id: "rp1", provider: "github", name: "nasebanal/nb-target-api", component: "" }];
+  const repositories = opts.repositories ?? [{ id: "rp1", provider: "github", name: "nasebanal/nb-target-api", component: "", attachments_enabled: true }];
   const specs = opts.specs ?? [{ id: "sp1", name: "Target API", repository_id: "rp1" }];
   vi.stubGlobal(
     "fetch",
@@ -119,7 +119,7 @@ describe("cases in the payload", () => {
     ]);
   });
 
-  it("sends none for Locust", () => {
+  it("sends none for a Locust stats file with only the aggregate row", () => {
     const f = join(dir, "locust_stats.csv");
     writeFileSync(f, LOCUST_STATS);
     const { suite } = parseReport({ format: "locust", kind: "load", tool: "locust", maxFailRatio: 0, file: f });
@@ -746,6 +746,68 @@ describe("--attach: keeping the tool's own report with the result", () => {
     writeFileSync(report, "x");
     await expect(run([...base(), "--attach", report])).rejects.toThrow(/The result was reported, but the attached report was not kept: An attachment can be at most/);
     expect(calls.map((c) => c.method + " " + c.url.pathname)).toContain("POST /api/v1/specs/sp1/results");
+  });
+
+  const repo = (attachments_enabled?: boolean) => [
+    { id: "rp1", provider: "github", name: "nasebanal/nb-target-api", component: "", ...(attachments_enabled === undefined ? {} : { attachments_enabled }) },
+  ];
+  const sentFiles = () => calls.filter((c) => c.url.pathname.endsWith("/attachment"));
+  const reported = () => calls.some((c) => c.method === "POST" && c.url.pathname.endsWith("/results"));
+  const reportFile = () => {
+    const f = join(dir, "report.html");
+    writeFileSync(f, "x");
+    return f;
+  };
+
+  it.each([
+    ["off", false, /attachments are off .*nb specs repositories update rp1 --attachments on\)\. The file was not sent/],
+    ["unknown", undefined, /did not say whether attachments are on .*The file was not sent/],
+  ])("--attach with attachments %s: reports the result, keeps the file here and fails", async (_name, setting, message) => {
+    stubApi(undefined, { repositories: repo(setting as boolean | undefined) });
+    await expect(run([...base(), "--attach", reportFile()])).rejects.toThrow(message);
+    expect(reported()).toBe(true);
+    expect(sentFiles()).toHaveLength(0);
+    expect(JSON.parse(stdout.join(""))).not.toHaveProperty("attachment");
+  });
+
+  it.each([
+    ["off", false, "- report not attached: attachments are off"],
+    ["unknown", undefined, "! report not attached: the catalog did not say"],
+  ])("--attach-if-enabled with attachments %s: says so, sends no file and succeeds", async (_name, setting, line) => {
+    stubApi(undefined, { repositories: repo(setting as boolean | undefined) });
+    await run([...base(), "--attach-if-enabled", reportFile()]);
+    expect(reported()).toBe(true);
+    expect(sentFiles()).toHaveLength(0);
+    expect(stderr.join("")).toContain(line);
+    expect(JSON.parse(stdout.join(""))).not.toHaveProperty("attachment");
+  });
+
+  it("--attach-if-enabled does not even read the file when attachments are off", async () => {
+    stubApi(undefined, { repositories: repo(false) });
+    await run([...base(), "--attach-if-enabled", join(dir, "nope")]);
+    expect(reported()).toBe(true);
+  });
+
+  it("--attach-if-enabled attaches when attachments are on", async () => {
+    stubApi(undefined, { repositories: repo(true) });
+    await run([...base(), "--attach-if-enabled", reportFile()]);
+    expect(sentFiles()).toHaveLength(1);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({ attachment: { name: "report.html" } });
+  });
+
+  it("--attach-if-enabled with attachments on still fails when the report cannot be attached", async () => {
+    stubApi(undefined, { repositories: repo(true) });
+    await expect(run([...base(), "--attach-if-enabled", join(dir, "nope")])).rejects.toThrow(/not found/);
+    expect(reported()).toBe(false);
+    stubApi(undefined, { repositories: repo(true), attachmentStatus: 413 });
+    await expect(run([...base(), "--attach-if-enabled", reportFile()])).rejects.toThrow(/was not kept: An attachment can be at most/);
+  });
+
+  it("refuses --attach together with --attach-if-enabled", async () => {
+    stubApi();
+    const f = reportFile();
+    await expect(run([...base(), "--attach", f, "--attach-if-enabled", f])).rejects.toThrow(/exclusive/);
+    expect(calls).toHaveLength(0);
   });
 
   it("--dry-run reads and measures it, and sends nothing", async () => {

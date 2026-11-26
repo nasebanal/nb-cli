@@ -127,19 +127,28 @@ nb assurance report upload --dir locust/logs/20261001_090000
   job land in the same run, and re-running a job replaces its own result.
   Commit, branch and CI URL are detected the same way; override with `--run-key`,
   `--commit`, `--branch`, `--ci-url`.
-- **Keep the tool's own report (`--attach <file|folder>`):** a CI runner is thrown away
-  when the job ends, and the summary above is not the tool's report (Playwright's HTML
-  report, Specmatic's report, a JUnit file with everything in it). `--attach` sends the
-  original with the result: a file as it is, a folder as a zip made by the CLI (regular
-  files only, symbolic links are never followed). Up to 20 MiB per result and 200 MiB per
-  repository; the CLI checks the size before anything is sent. It is **opt-in twice** - nothing is
-  attached unless you pass it, and the server refuses it (403 `ATTACHMENTS_DISABLED`) until
-  the spec has turned on "Attaching original reports" in its settings (off by
-  default). Make sure the report holds no secrets or personal data.
-  The server only stores it (next to the result's cases, deleted with the result and by
-  the repository's retention) and offers it as a **download** to the repository's members in
-  Assurance; it is never opened, unzipped or shown in the browser. A failed attachment
-  leaves the result reported and the command exits non-zero with the reason.
+- **Keep the tool's own report (`--attach`, `--attach-if-enabled <file|folder>`):** a CI runner
+  is thrown away when the job ends, and the summary above is not the tool's report (Playwright's
+  HTML report, Specmatic's report, a JUnit file with everything in it). Both options send the
+  original with the result: a file as it is, a folder as a zip made by the CLI (regular files
+  only, symbolic links are never followed). Up to 20 MiB per result and 200 MiB per spec; the
+  CLI checks the size before it sends anything. It is **opt-in twice**: nothing is attached unless
+  you ask, and the repository must have attachments on (Repository Management, or
+  `nb specs repositories update <id> --attachments on`; off by default). The CLI reads that
+  setting first, so a file the repository does not take never leaves the machine; the server
+  checks again. Make sure the report holds no secrets or personal data. The server only stores
+  it (deleted with the result and by retention) and offers it as a **download**; it is never
+  opened, unzipped or shown in the browser. A result is always reported first.
+
+  | Repository's attachments | `--attach` (the report is required) | `--attach-if-enabled` |
+  |---|---|---|
+  | on | attaches it | attaches it |
+  | off | does not send it, **fails** | does not send it, says so, succeeds |
+  | cannot be told | does not send it, **fails** | does not send it, warns, succeeds |
+  | on, but attaching fails (size, limit, network) | **fails** | **fails** |
+
+  To be sure the report is kept, use `--attach`. Reporting the same result again replaces it,
+  **including its attached report**: send it again with the same option, or the old one is gone.
 - **Pass / fail:** JUnit - any failed or errored test fails the suite. Locust - an
   unhandled task exception, or a failure ratio above `--max-fail-ratio` (default
   `$LOCUST_MAX_FAIL_RATIO`, else 0), fails it - the same rule as nb-quickstarts'
@@ -148,7 +157,7 @@ nb assurance report upload --dir locust/logs/20261001_090000
   failure, its message plus the stack trace, so the Assurance screens can list them. Up to
   5000 cases per suite - over that, failed and skipped tests are kept first and passed ones
   fill the rest; a failure text is clipped to 2000 characters, and about 1 MB of failure text
-  is sent in total (names and outcomes always stay). Locust reports have no cases.
+  is sent in total (names and outcomes always stay). A Locust report sends one case per endpoint row of the stats CSV: failed when any of its requests failed (the run's pass / fail is the rule above, so a passed run can list a failed endpoint), timed by its 95th percentile, with the counts, median, max and requests per second as the message.
 - `--dry-run` prints what would be sent and calls nothing.
 
 ## Repositories and the API catalog from a pipeline (`nb specs`)

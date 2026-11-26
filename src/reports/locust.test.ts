@@ -22,6 +22,24 @@ describe("parseCsv", () => {
 });
 
 describe("summariseLocust", () => {
+  it("makes one case per endpoint row, timed by p95, and none for the aggregate", () => {
+    const r = summariseLocust({ stats: STATS(1000, 0) }, 0);
+    expect(r.cases).toEqual([
+      {
+        name: "GET /api/accounts",
+        status: "passed",
+        duration_ms: 40,
+        message: "1000 requests, 0 failures, median 12 ms, p95 40 ms, max 210 ms, 100 req/s",
+      },
+    ]);
+  });
+
+  it("marks an endpoint with a failed request, even when the run is within the allowed ratio", () => {
+    const r = summariseLocust({ stats: STATS(1000, 5) }, 0.01);
+    expect(r.status).toBe("passed");
+    expect(r.cases[0].status).toBe("failed");
+  });
+
   it("builds the load summary from the Aggregated row", () => {
     const r = summariseLocust({ stats: STATS(1000, 0) }, 0);
     expect(r).toMatchObject({ total: 1000, passed: 1000, failed: 0, status: "passed", reasons: [] });
