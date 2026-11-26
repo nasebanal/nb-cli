@@ -269,6 +269,7 @@ export function parseReport(opts: ParseOptions): ParsedReport {
       ...(l.duration_ms !== null ? { duration_ms: l.duration_ms } : {}),
       metrics: l.metrics,
       ...(toFailures(l.failures) ? { failures: toFailures(l.failures) } : {}),
+      ...(toCases(l.cases) ? { cases: toCases(l.cases) } : {}),
     },
   };
 }
@@ -348,6 +349,7 @@ interface UploadOptions {
   specHash?: string;
   contractFile?: string;
   attach?: string;
+  attachIfEnabled?: string;
   repositoryId?: string;
   specId?: string;
   repository?: string;
@@ -425,6 +427,24 @@ export interface Attachment {
   bytes: Uint8Array;
 }
 
+/**
+ * Whether the catalog says results of this repository may carry the original report. `unknown`: its answer does
+ * not say (an older catalog). The server checks again on the upload itself; this only decides whether to send.
+ */
+export type AttachmentSetting = "enabled" | "disabled" | "unknown";
+
+export function attachmentSetting(repository: { attachments_enabled?: boolean }): AttachmentSetting {
+  if (repository.attachments_enabled === true) return "enabled";
+  return repository.attachments_enabled === false ? "disabled" : "unknown";
+}
+
+/** Why a report was not sent, and what to do about it. */
+function notSentReason(setting: Exclude<AttachmentSetting, "enabled">, repositoryId: string): string {
+  return setting === "disabled"
+    ? `attachments are off for the repository (turn them on in Repository Management, or: nb specs repositories update ${repositoryId} --attachments on)`
+    : "the catalog did not say whether attachments are on for the repository";
+}
+
 /** `--attach`: a file as it is, or a folder as a zip. Refuses before anything is sent: missing, empty, or too big for the server. */
 export function prepareAttachment(path: string, limit: number = MAX_ATTACHMENT_BYTES): Attachment {
   if (!existsSync(path)) throw new Error(`--attach: not found: ${path}`);
@@ -488,7 +508,8 @@ export function buildReportUploadCommand(): Command {
     .option("--contract-file <path>", "the contract document the result was produced against (e.g. node_modules/@nasebanal/api-specs-<api>/spec.yaml): its SHA-256 is sent as --spec-hash would, the same hash the catalog keeps for that document. Exclusive with --spec-hash")
     .option("--metric <key=value>", "an extra number for the suite, repeatable (e.g. --metric high=0 --metric medium=3; for security: critical, high, medium, low, info)", (v: string, all: string[] = []) => [...all, v])
     .option("--api-version <v>", "by names: the API version (v1, v2) of the spec, part of the spec's key (a new major API version is a new spec). It selects the spec; a result has no API version of its own. Left out, it is the API version of the one spec the rest of the key matches (several: the error lists them). With --all-specs: only the specs at this API version get the result (a release branch feeds its own API version)")
-    .option("--attach <path>", "keep the tool's own report with the result: a file as it is, or a folder as a zip (up to 20 MiB). The server only stores it and offers it for download; nothing opens it. Nothing is attached unless you pass this, so check the report holds no secrets")
+    .option("--attach <path>", "keep the tool's own report with the result: a file as it is, or a folder as a zip (up to 20 MiB). The server only stores it and offers it for download; nothing opens it. Nothing is attached unless you ask, so check the report holds no secrets. The report is required: if the repository's attachments are off (or that cannot be told), the result is still reported, the file is not sent and the command fails")
+    .option("--attach-if-enabled <path>", "as --attach, but only when the repository's attachments are on: otherwise the file is not sent, a line says so and the command succeeds. When they are on, a report that cannot be attached still fails the command. Exclusive with --attach")
     .option("--spec-id <id>", "the spec to report to, by its id in the catalog (default: $NB_SPEC_ID). Keep the id in the pipeline's variable: a rename of the spec or its repository never moves the results. Exclusive with --repository / --component / --spec")
     .option("--repository <owner/name>", "by names: the repository the spec is tied to (owner/name for a git host). Needs --spec; --component is optional (none = the repository as a whole). The three are checked against each other: the spec must be tied to exactly that repository row. Nothing is created")
     .option("--component <name>", "by names: the component part of the repository's key (the owner's own name for a part of it, e.g. account-api, web); optional, none = the repository as a whole")
@@ -561,7 +582,11 @@ export function buildReportUploadCommand(): Command {
 
       const ci: CiInfo = detectCi(process.env);
       const runKey = opts.runKey ?? ci.runKey ?? fail("Cannot determine the run key; pass --run-key");
-      const attachment = opts.attach !== undefined ? prepareAttachment(opts.attach) : undefined;
+      if (opts.attach !== undefined && opts.attachIfEnabled !== undefined) fail("--attach and --attach-if-enabled are exclusive: one requires the report to be kept, the other keeps it only when attachments are on");
+      const attachPath = opts.attach ?? opts.attachIfEnabled;
+      const required = opts.attach !== undefined;
+      // A required report is read before anything is sent; an optional one only once the repository says it takes it.
+      let attachment = required ? prepareAttachment(opts.attach!) : undefined;
       // Which spec the result is for is settled before anything is sent: an id, or names the catalog turns into one (or, with
       // --all-specs, every spec of one repository row: only for results that belong to the source).
       if (opts.allSpecs) {
@@ -593,8 +618,10 @@ export function buildReportUploadCommand(): Command {
       });
       const env = (opts.env as Environment | undefined) || resolveEnv();
       const specsConn = { baseUrl: specsBaseUrl(env), token: opts.token || (await resolveAccessToken()), org };
-      const attachmentNote = attachment ? { attachment: { name: attachment.name, size_bytes: attachment.bytes.length } } : {};
+      const noteOf = (a: Attachment | undefined) => (a ? { attachment: { name: a.name, size_bytes: a.bytes.length } } : {});
       if (opts.dryRun) {
+        if (!required && attachPath !== undefined) attachment = prepareAttachment(attachPath);
+        const attachmentNote = { ...noteOf(attachment), ...(attachment && !required ? { attachment_only_if_enabled: true } : {}) };
         // Nothing is written. By names the catalog is only read (to say which spec and repository they mean); by id nothing is called.
         if (opts.allSpecs) {
           const hits = await resolveRepositorySpecs(specsConn, ref);
@@ -615,17 +642,32 @@ export function buildReportUploadCommand(): Command {
       const orgHeaders = org === "personal" ? undefined : { "X-Active-Organization-Id": org };
       const hits: ResolvedSpec[] = opts.allSpecs ? await resolveRepositorySpecs(specsConn, ref) : [await resolveSpec(specsConn, ref)];
       const conn = { baseUrl, token: specsConn.token, ...(orgHeaders ? { headers: orgHeaders } : {}) };
+      // Whether to send the file is settled per repository before any result goes out: a file the repository does not
+      // take never leaves this machine.
+      if (!required && attachPath !== undefined && hits.some((h) => attachmentSetting(h.repository) === "enabled")) attachment = prepareAttachment(attachPath);
       const results: UploadResult[] = [];
+      let notKept: string | undefined;
+      let attached = false;
       for (const hit of hits) {
         const label = `${hit.spec_name} (${hit.repository.provider} ${hit.repository.name}${hit.repository.component ? ` / ${hit.repository.component}` : ""}), id ${hit.spec_id}`;
         const result = await uploadReport({ conn, specId: hit.spec_id, payload: buildPayload(hit.repository_id) });
-        if (attachment) await uploadAttachment(conn, result, attachment);
+        const setting = attachPath === undefined ? undefined : attachmentSetting(hit.repository);
+        const sent = setting === "enabled" ? attachment : undefined;
+        if (sent) {
+          await uploadAttachment(conn, result, sent);
+          attached = true;
+        } else if (setting !== undefined && setting !== "enabled") {
+          const why = notSentReason(setting, hit.repository_id);
+          if (required) notKept = why;
+          else process.stderr.write(`${setting === "unknown" ? "!" : "-"} report not attached: ${why}\n`);
+        }
         results.push(result);
         process.stderr.write(
           `✓ ${kind}/${checkedTool} ${parsed.suite.status}: ${parsed.note} -> spec ${label}, run '${runKey}'${result.replaced ? " (replaced)" : ""}` +
-            `${attachment ? `, attached ${attachment.name} (${(attachment.bytes.length / 1024).toFixed(0)} KiB)` : ""}\n`,
+            `${sent ? `, attached ${sent.name} (${(sent.bytes.length / 1024).toFixed(0)} KiB)` : ""}\n`,
         );
       }
+      const attachmentNote = attached ? noteOf(attachment) : {};
       if (opts.allSpecs) {
         printJson({ results, ...attachmentNote });
         exportGithubOutput("spec_ids", results.map((x) => x.spec_id).join(","));
@@ -634,5 +676,7 @@ export function buildReportUploadCommand(): Command {
         exportGithubOutput("spec_id", results[0].spec_id);
       }
       exportGithubOutput("repository_id", results[0].repository_id);
+      // After every result is in: a missing report must not cost the pipeline its test results.
+      if (notKept) throw new Error(`The result was reported, but the attached report was not kept: ${notKept}. The file was not sent`);
     });
 }

@@ -7,7 +7,7 @@
  * task exception, or a failure ratio above the allowed one, fails the run.
  */
 import { toRecords } from "./csv.js";
-import type { SuiteFailure } from "./junit.js";
+import type { JunitCase, SuiteFailure } from "./junit.js";
 
 export interface LocustFiles {
   stats: string;
@@ -23,6 +23,8 @@ export interface LocustSummary {
   duration_ms: number | null;
   metrics: Record<string, number>;
   failures: SuiteFailure[];
+  /** One per request row (endpoint) of the stats CSV, for the result's detail list. */
+  cases: JunitCase[];
   status: "passed" | "failed";
   /** Why the run failed, for the CLI's one-line report; empty when it passed. */
   reasons: string[];
@@ -52,10 +54,36 @@ function num(value: string | undefined): number | null {
 
 const round = (n: number, digits = 2) => Math.round(n * 10 ** digits) / 10 ** digits;
 
+const isAggregate = (r: Record<string, string>) => r.Name === "Aggregated" || r.Name === "Total";
+
+/**
+ * An endpoint's row as a case: failed when any of its requests failed (the run's own verdict is separate: it
+ * allows a failure ratio), its time the 95th percentile in whole ms, the other numbers in the message.
+ */
+function endpointCase(r: Record<string, string>): JunitCase {
+  const requests = read(r, COLUMNS.requests) ?? 0;
+  const failed = read(r, COLUMNS.failures) ?? 0;
+  const median = num(r["50%"]) ?? read(r, COLUMNS.median);
+  const p95 = num(r["95%"]);
+  const max = read(r, COLUMNS.max);
+  const rps = num(r["Requests/s"]);
+  const parts = [`${requests} requests`, `${failed} failures`];
+  if (median !== null) parts.push(`median ${round(median)} ms`);
+  if (p95 !== null) parts.push(`p95 ${round(p95)} ms`);
+  if (max !== null) parts.push(`max ${round(max)} ms`);
+  if (rps !== null) parts.push(`${round(rps)} req/s`);
+  return {
+    name: `${r.Type ?? r.Method ?? ""} ${r.Name ?? ""}`.trim() || "(unnamed request)",
+    status: failed > 0 ? "failed" : "passed",
+    duration_ms: p95 === null ? null : Math.round(p95),
+    message: parts.join(", "),
+  };
+}
+
 export function summariseLocust(files: LocustFiles, maxFailRatio: number): LocustSummary {
   const stats = toRecords(files.stats);
   // The row of all requests together: "Aggregated" (2.x) or "Total" (1.x).
-  const total = stats.find((r) => r.Name === "Aggregated" || r.Name === "Total");
+  const total = stats.find(isAggregate);
   if (!total) throw new Error('No "Aggregated" (or "Total") row in the stats CSV - is this a Locust *_stats.csv file?');
   // Without the counts the numbers below would silently be 0, a green result for a report nobody understood: refuse it.
   if (!has(total, COLUMNS.requests) || !has(total, COLUMNS.failures)) {
@@ -109,6 +137,7 @@ export function summariseLocust(files: LocustFiles, maxFailRatio: number): Locus
     duration_ms,
     metrics,
     failures,
+    cases: stats.filter((r) => !isAggregate(r)).map(endpointCase),
     status: reasons.length === 0 ? "passed" : "failed",
     reasons,
   };
