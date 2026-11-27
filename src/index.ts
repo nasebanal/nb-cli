@@ -37,8 +37,9 @@ program
 
 program.addCommand(buildAuthCommand());
 program.addCommand(buildUpgradeCommand(version));
+// Set up once, so it is not in the command list (nor offered by Tab): the end of `nb -h` says how, in one line.
 program
-  .command("completion")
+  .command("completion", { hidden: true })
   .description("Print the tab-completion script: source <(nb completion zsh)")
   .argument("<shell>", `shell: ${SHELLS.join(" | ")}`)
   .action((shell: string) => {
@@ -94,6 +95,8 @@ program.addHelpText(
   '\n[beta] marks the groups of NASEBANAL Evolution\'s beta: they may change in any release.\nSee README, "Stability and compatibility".',
 );
 program.addHelpText("after", () => pluginHelp(findPlugins(process.env.PATH, reserved)));
+// The tools' text above ends in a blank line.
+program.addHelpText("after", "Tab completion (set up once): source <(nb completion zsh)   # or bash");
 
 async function main(): Promise<void> {
   // The shells' completion scripts call `nb __complete <words...>`: one candidate per line, nothing else on stdout.
