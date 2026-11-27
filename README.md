@@ -713,6 +713,8 @@ To make your own: an executable `nb-<name>` on `PATH` whose second line is `# nb
 
 ## Tab completion
 
+`nb completion` is set up once, so `nb -h` does not list it among the commands: its last line says how to set it up.
+
 ```bash
 # ~/.zshrc, after compinit                    # ~/.bashrc
 source <(nb completion zsh)                   source <(nb completion bash)
