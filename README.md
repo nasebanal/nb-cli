@@ -37,8 +37,8 @@ The **kind** is one of a fixed set of perspectives (`unit`, `e2e`, `contract`,
 `security`, `load`); the **tool** is a free label (`vitest`, `pytest`, `playwright`,
 `specmatic`, `zap`, `locust`, or `trivy`, `k6`, `cypress`...). What a result
 means is carried by its kind and its numbers, so a scanner or runner can be swapped
-without a change in Assurance. The CLI reads **JUnit XML** (any tool) and
-**Locust CSV**; for a tool that writes something else, convert it to JUnit or give the
+without a change in Assurance. The CLI reads **JUnit XML** (any tool),
+**Locust CSV** and **ZAP's JSON report** (ZAP is read from its JSON only); for a tool that writes something else, convert it to JUnit or give the
 numbers with `--metric` (for a scanner: `critical`, `high`, `medium`, `low`, `info`).
 
 ```bash
@@ -60,8 +60,8 @@ nb assurance report upload --file results/junit.xml --kind e2e --tool playwright
 nb assurance report upload --file report/junit.xml --kind unit --tool vitest --repository nasebanal/nb-account-api --all-specs --api-version v1
 
 # Two scans of one tool of the same spec (ZAP's baseline and full scan): a label tells them apart
-nb assurance report upload --file report/baseline-junit.xml --kind security --tool zap --label baseline
-nb assurance report upload --file report/full-scan-junit.xml --kind security --tool zap --label full-scan
+nb assurance report upload --file report/baseline-report.json --kind security --tool zap --label baseline
+nb assurance report upload --file report/full-scan-report.json --kind security --tool zap --label full-scan
 
 # The tool's own version is informational and optional
 nb assurance report upload --file report/junit.xml --kind unit --tool pytest --tool-version 9.1.0
@@ -86,8 +86,11 @@ nb assurance report upload --file specmatic/junit.xml --kind contract --tool spe
   --contract-file node_modules/@nasebanal/api-specs-assurance/spec.yaml
 # Evolution matches the hash against the revisions of this spec
 
-# Extra numbers for the suite (repeatable), e.g. ZAP's findings by severity - what the Assurance security gate reads
-nb assurance report upload --file zap/report/baseline-junit.xml --kind security --tool zap --metric high=0 --metric medium=3 --metric low=2
+# Extra numbers for the suite (repeatable), e.g. a scanner's findings by severity - what the Assurance security gate reads
+nb assurance report upload --file report/trivy-junit.xml --kind security --tool trivy --metric high=0 --metric medium=3 --metric low=2
+
+# ZAP: upload the JSON report ZAP writes (`zap-baseline.py -t <url> -J report.json`); no converter and no counts to give
+nb assurance report upload --file report.json --kind security --tool zap --label baseline
 
 # Locust (--csv <prefix>): the *_stats.csv, with its *_failures / *_exceptions / *_stats_history siblings
 nb assurance report upload --dir locust/logs/20261001_090000
@@ -153,6 +156,14 @@ nb assurance report upload --dir locust/logs/20261001_090000
   unhandled task exception, or a failure ratio above `--max-fail-ratio` (default
   `$LOCUST_MAX_FAIL_RATIO`, else 0), fails it - the same rule as nb-quickstarts'
   `locust/bin/exit_code.py`. `--status passed|failed` overrides either.
+- **ZAP's JSON (`--tool zap` with a `.json` file):** the `traditional-json` report. The result **fails when there is a
+  high alert** (what the Assurance security gate fails on); medium and low alerts are findings of a passing result. Each
+  alert of each site is a case: low and above `failed`, informational `passed`, one marked a false positive in ZAP
+  `skipped` and not counted. The counts (`high`, `medium`, `low`, `info`) and the ZAP version are taken from the report.
+  URLs, parameters, evidence and the long texts are not sent (use `--attach` to keep the report itself). A file that is
+  not ZAP's report, or a report with no site (nothing was scanned), is refused rather than read as clean.
+  **`--tool zap` takes this JSON only:** a JUnit file made from a ZAP report is refused (a pipeline that converted it
+  uploads the `-J` file instead and drops its `--metric` counts).
 - **Per-test cases (JUnit):** every test is sent with its name, outcome, time and, for a
   failure, its message plus the stack trace, so the Assurance screens can list them. Up to
   5000 cases per suite - over that, failed and skipped tests are kept first and passed ones

@@ -24,6 +24,7 @@ import { exportGithubOutput, printJson } from "../output.js";
 import { detectCi, readReportPath, type CiInfo } from "./ci.js";
 import { parseJunit, type JunitCase, type SuiteFailure } from "./junit.js";
 import { summariseLocust } from "./locust.js";
+import { summariseZap } from "./zap.js";
 import { parseSpecmaticCoverage } from "./specmatic.js";
 import { MAX_ATTACHMENT_BYTES, zipDirectory } from "./zip.js";
 import { checkOrg, hashText, readSpecFile, specsBaseUrl } from "../specs/push.js";
@@ -31,7 +32,8 @@ import { resolveRepositorySpecs, resolveSpec, type ResolvedSpec, type SpecRef } 
 
 export const SUITE_KINDS = ["unit", "e2e", "load", "contract", "security"] as const;
 export type SuiteKind = (typeof SUITE_KINDS)[number];
-export type ReportFormat = "junit" | "locust";
+/** `zap`: ZAP's own JSON report. */
+export type ReportFormat = "junit" | "locust" | "zap";
 export const RUN_PROVIDERS = ["github", "gitlab", "other"] as const;
 export type RunProvider = (typeof RUN_PROVIDERS)[number];
 
@@ -80,12 +82,15 @@ export function checkReportPath(raw: string): string {
 /**
  * The tool is a label (nb-assurance-api `TOOL_PATTERN`): what a result means is carried by its kind and its
  * numbers, so any scanner or runner can be reported without a change here, as long as its report is
- * JUnit XML (or the numbers are given with --metric). Only the formats this CLI can read matter.
+ * JUnit XML (or the numbers are given with --metric). Locust's CSV and ZAP's JSON are read as they are, and only so. Only the formats this CLI can read matter.
  */
 const TOOL_PATTERN = /^[a-z0-9][a-z0-9._-]{0,49}$/;
 
 /** Tools whose report is not JUnit XML; every other tool is read as JUnit. */
-const NON_JUNIT_TOOLS: Record<string, ReportFormat> = { locust: "locust" };
+const NON_JUNIT_TOOLS: Record<string, ReportFormat> = { locust: "locust", zap: "zap" };
+
+/** ZAP writes no JUnit of its own: its JSON is what it is read from, so a converted file is refused (its severities are lost in it). */
+const ZAP_JSON_ONLY = "ZAP is read from its JSON report only (the traditional-json template, e.g. zap-baseline.py -J report.json): upload that .json file as it is, with no conversion";
 
 /**
  * Check a kind / tool / format combination before anything is parsed or sent.
@@ -97,6 +102,8 @@ export function checkSuite(kind: SuiteKind, tool: string, format: ReportFormat):
     throw new Error(`Tool '${tool}' is not a label: use lower-case letters, digits, '.', '_' and '-' (up to 50), e.g. vitest or trivy`);
   }
   const expected = NON_JUNIT_TOOLS[name] ?? "junit";
+  if (name === "zap" && format !== "zap") throw new Error(ZAP_JSON_ONLY);
+  if (format === "zap" && name === "zap" && kind !== "security") throw new Error("A ZAP report is a security result: use --kind security");
   if (format !== expected) {
     throw new Error(`Tool '${name}' reports in ${expected} format, but --format is ${format}`);
   }
@@ -247,6 +254,24 @@ export function parseReport(opts: ParseOptions): ParsedReport {
         ...(j.duration_ms !== null ? { duration_ms: j.duration_ms } : {}),
         ...(toFailures(j.failures) ? { failures: toFailures(j.failures) } : {}),
         ...(toCases(j.cases) ? { cases: toCases(j.cases) } : {}),
+      },
+    };
+  }
+
+  if (opts.format === "zap") {
+    const z = summariseZap(text);
+    const status = opts.status ?? z.status;
+    return {
+      note: `high ${z.metrics.high}, medium ${z.metrics.medium}, low ${z.metrics.low}, info ${z.metrics.info}${z.skipped ? `, ${z.skipped} false positive(s) not counted` : ""}`,
+      suite: {
+        ...base,
+        // The report says which ZAP wrote it; --tool-version still wins.
+        ...(!opts.toolVersion && z.version ? { tool_version: z.version } : {}),
+        status,
+        tests: { total: z.total, passed: z.passed, failed: z.failed, skipped: z.skipped },
+        metrics: { ...z.metrics },
+        ...(toFailures(z.failures) ? { failures: toFailures(z.failures) } : {}),
+        ...(toCases(z.cases) ? { cases: toCases(z.cases) } : {}),
       },
     };
   }
@@ -413,12 +438,16 @@ function hashOfContractFile(file: string): string {
 
 function resolveFormat(opts: UploadOptions, file: string): ReportFormat {
   if (opts.format !== undefined) {
-    if (opts.format !== "junit" && opts.format !== "locust") fail("--format must be junit or locust");
+    if (opts.format !== "junit" && opts.format !== "locust" && opts.format !== "zap") fail("--format must be junit, locust or zap");
     return opts.format;
+  }
+  if (opts.tool?.trim().toLowerCase() === "zap") {
+    if (!file.toLowerCase().endsWith(".json")) fail(ZAP_JSON_ONLY);
+    return "zap";
   }
   if (opts.dir !== undefined || file.endsWith(".csv")) return "locust";
   if (file.endsWith(".xml")) return "junit";
-  return fail("Cannot tell the report format from the file name; pass --format junit|locust");
+  return fail("Cannot tell the report format from the file name; pass --format junit|locust|zap (a .json file is read for --tool zap only)");
 }
 
 export interface Attachment {
@@ -495,11 +524,11 @@ export function specRefOf(opts: { repositoryId?: string; specId?: string; reposi
 
 export function buildReportUploadCommand(): Command {
   return new Command("upload")
-    .description("Report a test result file (JUnit XML or Locust CSV) to an Assurance spec: by its id (--spec-id, or $NB_SPEC_ID), or by names (--repository, optional --component and --group, --spec, and --api-version when the name exists at several API versions). The spec must be tied to a repository; nothing is registered by a report")
-    .option("--file <path>", "the report file (JUnit XML, or Locust *_stats.csv)")
+    .description("Report a test result file (JUnit XML, Locust CSV or ZAP JSON) to an Assurance spec: by its id (--spec-id, or $NB_SPEC_ID), or by names (--repository, optional --component and --group, --spec, and --api-version when the name exists at several API versions). The spec must be tied to a repository; nothing is registered by a report")
+    .option("--file <path>", "the report file (JUnit XML, Locust *_stats.csv, or ZAP's JSON report with --tool zap)")
     .option("--dir <dir>", "a Locust output directory (uses its *_stats.csv)")
     .option("--coverage-report <path>", "specmatic: its report (the HTML or a JSON copy); adds the API coverage as the coverage_pct metric")
-    .option("--format <format>", "junit | locust (default: from the file name)")
+    .option("--format <format>", "junit | locust | zap (default: from the file name)")
     .option("--kind <kind>", `what the suite proves: ${SUITE_KINDS.join(" | ")} (locust: load)`)
     .option("--tool <label>", "the producing tool, a free label, e.g. vitest, pytest, playwright, specmatic, zap, trivy (locust: locust)")
     .option("--label <name>", "tells apart results that are otherwise the same, such as two scans of one tool of the same spec (e.g. --label baseline, --label full-scan); part of the result's identity, so the same label again replaces the result; optional")
@@ -536,9 +565,9 @@ export function buildReportUploadCommand(): Command {
       if (!existsSync(file)) fail(`File not found: ${file}`);
       const format = resolveFormat(opts, file);
 
-      const kind = (opts.kind ?? (format === "locust" ? "load" : undefined)) as SuiteKind | undefined;
+      const kind = (opts.kind ?? (format === "locust" ? "load" : format === "zap" ? "security" : undefined)) as SuiteKind | undefined;
       if (!kind || !(SUITE_KINDS as readonly string[]).includes(kind)) fail(`--kind is required: ${SUITE_KINDS.join(" | ")}`);
-      const tool = opts.tool ?? (format === "locust" ? "locust" : undefined);
+      const tool = opts.tool ?? (format === "locust" ? "locust" : format === "zap" ? "zap" : undefined);
       if (!tool) fail("--tool is required for JUnit reports (e.g. --tool pytest)");
       const checkedTool = checkSuite(kind, tool, format);
       if (opts.status !== undefined && opts.status !== "passed" && opts.status !== "failed") fail("--status must be passed or failed");

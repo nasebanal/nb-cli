@@ -72,7 +72,7 @@ E       assert 1 == 2</failure><system-out>log line</system-out></testcase>
     expect(parseJunit(xml)).toMatchObject(EXPECT);
   });
 
-  it("a ZAP report converted by nb-quickstarts (bin/zap_to_junit.mjs): a failed case per alert of Low or above", () => {
+  it("a scanner's findings written as JUnit: a failed case per finding", () => {
     const xml = `<testsuites><testsuite name="zap" tests="3" failures="1">
 <testcase classname="http://frontend:5173" name="Content Security Policy (CSP) Header Not Set"><failure message="Medium (High), 4 instance(s)"/></testcase>
 <testcase classname="http://frontend:5173" name="Modern Web Application"/>

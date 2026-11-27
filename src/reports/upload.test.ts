@@ -267,7 +267,7 @@ describe("nb assurance report upload", () => {
 
   it("--label tells apart two scans of one tool: sent trimmed, left out when not given, refused when empty or too long", async () => {
     stubApi(null);
-    const base = ["--spec-id", "sp1", "--run-key", "k", "--dry-run", "--kind", "security", "--tool", "zap", "--file", junitFile()];
+    const base = ["--spec-id", "sp1", "--run-key", "k", "--dry-run", "--kind", "security", "--tool", "trivy", "--file", junitFile()];
     await run([...base, "--label", " full-scan "]);
     expect(JSON.parse(stdout.join("")).payload.suite).toMatchObject({ label: "full-scan" });
     stdout.length = 0;
@@ -328,7 +328,7 @@ describe("nb assurance report upload", () => {
 
   it("--metric adds numbers to the suite, on top of what the report gave, and several can be repeated", async () => {
     stubApi(null);
-    const base = ["--spec-id", "sp1", "--run-key", "k", "--dry-run", "--kind", "security", "--tool", "zap", "--file", junitFile()];
+    const base = ["--spec-id", "sp1", "--run-key", "k", "--dry-run", "--kind", "security", "--tool", "trivy", "--file", junitFile()];
     await run([...base, "--metric", "high=0", "--metric", "medium=3", "--metric", "low=2"]);
     expect(JSON.parse(stdout.join("")).payload.suite.metrics).toEqual({ high: 0, medium: 3, low: 2 });
     expect(stderr.join("")).toContain("metrics high=0 medium=3 low=2");
@@ -339,7 +339,7 @@ describe("nb assurance report upload", () => {
 
   it("refuses a malformed --metric before anything is sent", async () => {
     stubApi(null);
-    const base = ["--spec-id", "sp1", "--run-key", "k", "--kind", "security", "--tool", "zap", "--file", junitFile()];
+    const base = ["--spec-id", "sp1", "--run-key", "k", "--kind", "security", "--tool", "trivy", "--file", junitFile()];
     for (const bad of ["high", "high=", "High=1", "high=abc", "1high=2", "=3"]) {
       await expect(run([...base, "--metric", bad])).rejects.toThrow(/--metric/);
     }
@@ -374,7 +374,7 @@ describe("nb assurance report upload", () => {
 
 describe("checkSuite", () => {
   it("takes the tool as a lower-cased label, the known ones and any other", () => {
-    for (const [kind, tool, format] of [["unit", "vitest", "junit"], ["unit", "pytest", "junit"], ["e2e", "playwright", "junit"], ["contract", "specmatic", "junit"], ["security", "zap", "junit"], ["load", "locust", "locust"], ["security", "trivy", "junit"], ["load", "k6", "junit"], ["e2e", "cypress", "junit"]] as const) {
+    for (const [kind, tool, format] of [["unit", "vitest", "junit"], ["unit", "pytest", "junit"], ["e2e", "playwright", "junit"], ["contract", "specmatic", "junit"], ["security", "zap", "zap"], ["load", "locust", "locust"], ["security", "trivy", "junit"], ["load", "k6", "junit"], ["e2e", "cypress", "junit"]] as const) {
       expect(checkSuite(kind, tool, format)).toBe(tool);
     }
     expect(checkSuite("unit", " Vitest ", "junit")).toBe("vitest");
@@ -387,6 +387,10 @@ describe("checkSuite", () => {
   it("rejects a tool paired with the wrong report format", () => {
     expect(() => checkSuite("load", "locust", "junit")).toThrow(/locust format/);
     expect(() => checkSuite("unit", "vitest", "locust")).toThrow(/junit format/);
+    // ZAP is its own JSON and nothing else: a JUnit file made from it is refused, and the JSON is a security result.
+    expect(() => checkSuite("security", "zap", "junit")).toThrow(/JSON report only/);
+    expect(() => checkSuite("unit", "zap", "zap")).toThrow(/--kind security/);
+    expect(() => checkSuite("security", "trivy", "zap")).toThrow(/junit format/);
   });
 });
 
